@@ -1,0 +1,43 @@
+{
+  "kards_uid": {
+    "description": "KARDS 官方 B 站 UID",
+    "hint": "默认 2127596945（KARDS官方）",
+    "type": "string",
+    "default": "2127596945"
+  },
+  "max_items": {
+    "description": "每次展示的动态条数",
+    "type": "int",
+    "default": 5
+  },
+  "cache_ttl": {
+    "description": "动态缓存时间（秒）",
+    "hint": "同一时间段内重复查询直接使用缓存，0 表示不缓存",
+    "type": "int",
+    "default": 300
+  },
+  "send_pics": {
+    "description": "是否推送图片",
+    "hint": "关闭后动态只发文字，卡牌搜索也不附带卡图拼图",
+    "type": "bool",
+    "default": true
+  },
+  "max_pics_per_item": {
+    "description": "每条动态最多推送的图片数",
+    "hint": "0 表示不推送图片，最多 9 张",
+    "type": "int",
+    "default": 9
+  },
+  "deck_image": {
+    "description": "卡组代码是否生成卡组图片",
+    "hint": "关闭后只发送文字卡表",
+    "type": "bool",
+    "default": true
+  },
+  "vision_provider_id": {
+    "description": "卡图识别使用的视觉模型",
+    "hint": "填写 AstrBot 中支持图片输入的 provider ID，例如 openai_1/Gemma-4-31B-IT；留空自动选择",
+    "type": "string",
+    "default": "openai_1/Gemma-4-31B-IT"
+  }
+}

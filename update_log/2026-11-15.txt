@@ -1,0 +1,5 @@
+2026-11-15 00:35 — Update log
+--------------------------------------------------
+Action: 删除文件 news_fetch.py
+Reason: 函数 fetch_news、get_feed、build_report 均已被移除，仅保留 get_feed 在 news_fetch.py 中使用；主程序 main.py 仅调用 self.dyn，news_fetch.py 无外部引用
+Backup: /root/备份/kards_rm_steam_20261115/news_fetch.py

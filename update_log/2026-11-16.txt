@@ -1,0 +1,14 @@
+2026-11-16 13:55 — v0.7.6 卡图导入修复
+--------------------------------------------------
+Action:
+  - 修复卡图识别/导入经常超时失败的问题。
+  - 默认视觉模型从 openai_2/Agents-A1 改为 openai_1/Gemma-4-31B-IT（实测更快、稳定返回 JSON）。
+  - recognize_card 增加多模型自动回退：配置模型超时、报错或返回空卡名时，依次尝试 Gemma / MiMo / Agents-A1 等其他图片模型。
+  - 单次识别超时从 150 秒改为 75 秒，避免推理型模型把请求拖死。
+  - 同步更新 _conf_schema.json、配置文件、help.txt、README.md。
+Reason:
+  Agents-A1 是推理型模型，识别一张卡常需 70 秒以上，AstrBot 请求超时后会重试，
+  最终超过插件 150 秒上限，表现为“卡图导入失败/识别超时”。
+Files:
+  web_api.py, main.py, metadata.yaml, _conf_schema.json,
+  data/config/astrbot_plugin_bili_kards_config.json, help.txt, README.md

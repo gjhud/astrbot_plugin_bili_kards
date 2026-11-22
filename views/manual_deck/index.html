@@ -1,0 +1,1249 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>KARDS 手动卡组</title>
+  <!-- Load the plugin-page bridge before the page script so the API exists on startup. -->
+  <script src="/api/plugin/page/bridge-sdk.js"></script>
+  <style>
+    :root {
+      --bg: #f4f6f9;
+      --panel: #ffffff;
+      --panel-2: #eef2f7;
+      --text: #1c2430;
+      --muted: #68727f;
+      --line: #d8dee7;
+      --accent: #c9962b;
+      --accent-soft: #f6edd8;
+      --danger: #c2453d;
+      --ok: #2f8f5b;
+      --shadow: 0 6px 20px rgba(20, 30, 45, 0.08);
+      --radius: 12px;
+    }
+    html[data-theme="dark"] {
+      --bg: #0f141a;
+      --panel: #171e26;
+      --panel-2: #1e2732;
+      --text: #e6edf5;
+      --muted: #93a0ae;
+      --line: #2b3744;
+      --accent: #e0b34d;
+      --accent-soft: #332a16;
+      --danger: #e06a62;
+      --ok: #5cc98a;
+      --shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 14px/1.55 "Noto Sans SC", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+    }
+    button, input, select, textarea { font: inherit; color: inherit; }
+    button { cursor: pointer; }
+    .wrap { max-width: 1280px; margin: 0 auto; padding: 18px 18px 40px; }
+    .top {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 12px; flex-wrap: wrap; margin-bottom: 16px;
+    }
+    .title { display: flex; align-items: baseline; gap: 10px; }
+    .title h1 { margin: 0; font-size: 22px; letter-spacing: .5px; }
+    .title span { color: var(--muted); font-size: 13px; }
+    .toolbar { display: flex; gap: 8px; flex-wrap: wrap; }
+    .btn {
+      border: 1px solid var(--line); background: var(--panel);
+      padding: 7px 13px; border-radius: 9px; transition: .15s;
+    }
+    .btn:hover { border-color: var(--accent); color: var(--accent); }
+    .btn.primary { background: var(--accent); border-color: var(--accent); color: #1b1405; font-weight: 600; }
+    .btn.primary:hover { filter: brightness(1.06); color: #1b1405; }
+    .btn.danger { color: var(--danger); border-color: var(--danger); background: transparent; }
+    .btn.danger:hover { background: var(--danger); color: #fff; }
+    .btn.small { padding: 4px 9px; font-size: 12px; border-radius: 7px; }
+    .btn:disabled { opacity: .5; cursor: not-allowed; }
+    .grid { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(320px, 1fr); gap: 16px; align-items: start; }
+    @media (max-width: 980px) { .grid { grid-template-columns: 1fr; } }
+    .card {
+      background: var(--panel); border: 1px solid var(--line);
+      border-radius: var(--radius); box-shadow: var(--shadow); overflow: hidden;
+    }
+    .card-head {
+      display: flex; align-items: center; justify-content: space-between; gap: 10px;
+      padding: 13px 15px; border-bottom: 1px solid var(--line); background: var(--panel-2);
+    }
+    .card-head h2 { margin: 0; font-size: 15px; }
+    .head-tools { display: flex; align-items: center; gap: 8px; }
+    .card-body { padding: 14px 15px; }
+    .filter-grid {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+      gap: 8px; margin-bottom: 10px;
+    }
+    .filter-grid .search,
+    .filter-grid select,
+    .filter-grid input[type="number"] {
+      width: 100%; padding: 8px 10px; border: 1px solid var(--line);
+      border-radius: 9px; background: var(--bg);
+    }
+    .search:focus, select:focus, input:focus, textarea:focus {
+      outline: 2px solid var(--accent-soft); border-color: var(--accent);
+    }
+    .range {
+      display: flex; align-items: center; gap: 5px;
+      color: var(--muted); font-size: 12px;
+    }
+    .range input { min-width: 0; }
+    .chips { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
+    .chip {
+      padding: 4px 10px; border-radius: 999px; border: 1px solid var(--line);
+      background: transparent; color: var(--muted); font-size: 12px;
+    }
+    .chip.on { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+    .filter-actions {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 8px; margin-bottom: 10px; flex-wrap: wrap;
+    }
+    .catalog { display: flex; flex-direction: column; gap: 6px; max-height: 560px; overflow: auto; padding-right: 4px; }
+    .row-wrap { display: flex; flex-direction: column; gap: 4px; }
+    .row {
+      display: flex; align-items: center; gap: 10px; padding: 8px 10px;
+      border: 1px solid transparent; border-radius: 9px; background: var(--panel-2);
+    }
+    .row:hover { border-color: var(--line); }
+    .faction-dot { width: 9px; height: 26px; border-radius: 5px; flex: none; }
+    .row-main { min-width: 0; flex: 1; }
+    .row-name { display: block; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .row-sub { display: block; color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .row-desc { display: block; color: var(--muted); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .row-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 2px; }
+    .tag {
+      display: inline-block; padding: 0 5px; border-radius: 999px;
+      background: var(--accent-soft); color: var(--accent); font-size: 11px;
+    }
+    .cost {
+      flex: none; min-width: 34px; text-align: center; font-weight: 700;
+      color: var(--accent); background: var(--accent-soft); border-radius: 7px; padding: 2px 6px;
+    }
+    .mini {
+      border: 1px solid var(--line); background: var(--panel); border-radius: 7px;
+      width: 28px; height: 28px; line-height: 1; font-size: 14px; flex: none;
+    }
+    .mini:hover { border-color: var(--accent); color: var(--accent); }
+    .empty { color: var(--muted); text-align: center; padding: 26px 10px; }
+    .summary { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+    .stat {
+      flex: 1 1 100px; background: var(--panel-2); border-radius: 10px;
+      padding: 9px 11px; border: 1px solid var(--line);
+    }
+    .stat b { display: block; font-size: 18px; }
+    .stat span { color: var(--muted); font-size: 12px; }
+    .deck-list { display: flex; flex-direction: column; gap: 6px; max-height: 440px; overflow: auto; }
+    .deck-row {
+      display: flex; align-items: center; gap: 9px; padding: 7px 9px;
+      background: var(--panel-2); border-radius: 9px;
+    }
+    .count-pill {
+      flex: none; min-width: 34px; text-align: center; font-weight: 700;
+      color: var(--accent); background: var(--accent-soft); border-radius: 7px; padding: 2px 6px;
+    }
+    .warn {
+      margin-top: 10px; padding: 9px 11px; border-radius: 9px;
+      background: var(--accent-soft); color: var(--accent); font-size: 12px;
+    }
+    .preview { margin-top: 16px; }
+    .preview img { width: 100%; border-radius: 10px; border: 1px solid var(--line); display: block; margin-bottom: 12px; }
+    .toast {
+      position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
+      background: var(--text); color: var(--bg); padding: 9px 16px; border-radius: 999px;
+      opacity: 0; pointer-events: none; transition: .2s; z-index: 50; font-size: 13px;
+      max-width: 80vw; text-align: center;
+    }
+    .toast.show { opacity: 1; }
+    .muted { color: var(--muted); }
+    .hidden { display: none !important; }
+    .code-box {
+      margin-top: 10px; padding: 9px 11px; border-radius: 9px; background: var(--panel-2);
+      border: 1px solid var(--line); font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12px; word-break: break-all;
+    }
+    .alias-editor {
+      display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+      padding: 7px 9px; border: 1px dashed var(--line); border-radius: 9px; background: var(--panel);
+    }
+    .alias-input {
+      flex: 1 1 140px; min-width: 120px; padding: 5px 8px;
+      border: 1px solid var(--line); border-radius: 7px; background: var(--bg);
+    }
+    .alias-chip {
+      display: inline-flex; align-items: center; gap: 3px; padding: 2px 7px;
+      border-radius: 999px; background: var(--accent-soft); color: var(--accent); font-size: 12px;
+    }
+    .alias-chip button {
+      border: 0; background: transparent; color: inherit; padding: 0;
+      font-size: 14px; line-height: 1;
+    }
+    .alias-panel {
+      margin-bottom: 12px; padding: 10px 12px; border: 1px solid var(--line);
+      border-radius: 10px; background: var(--panel-2); max-height: 220px; overflow: auto;
+    }
+    .alias-panel-head { font-weight: 600; margin-bottom: 6px; }
+    .alias-panel-row {
+      display: flex; gap: 8px; align-items: flex-start; padding: 4px 0;
+      border-top: 1px dashed var(--line);
+    }
+    .alias-card-name {
+      flex: none; min-width: 120px; max-width: 40%; overflow: hidden;
+      text-overflow: ellipsis; white-space: nowrap; font-weight: 600; font-size: 12px;
+    }
+    .alias-chip-list { display: flex; flex-wrap: wrap; gap: 4px; }
+    .fix-editor {
+      display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+      padding: 7px 9px; border: 1px dashed var(--line); border-radius: 9px;
+      background: var(--panel-2);
+    }
+    .fix-editor select, .fix-editor input {
+      padding: 5px 8px; border: 1px solid var(--line);
+      border-radius: 7px; background: var(--bg);
+    }
+    .fix-editor input { flex: 1 1 220px; min-width: 160px; }
+    .import-card { margin-top: 16px; }
+    .import-card textarea {
+      width: 100%; min-height: 120px; padding: 9px 11px; border: 1px solid var(--line);
+      border-radius: 9px; background: var(--bg); font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12px; resize: vertical; margin-bottom: 8px;
+    }
+    .import-card input[type="file"] { margin-bottom: 8px; }
+    .import-status { color: var(--muted); font-size: 12px; }
+    .image-import-list { display: flex; flex-direction: column; gap: 8px; margin: 10px 0; }
+    .image-import-row {
+      display: flex; align-items: center; gap: 10px; padding: 8px;
+      border: 1px solid var(--line); border-radius: 10px; background: var(--panel-2);
+    }
+    .image-import-row img {
+      width: 48px; height: 67px; object-fit: cover; border-radius: 6px;
+      border: 1px solid var(--line); flex: none; background: var(--bg);
+    }
+    .image-import-row .file-name {
+      flex: 1 1 160px; min-width: 100px; font-size: 12px; overflow: hidden;
+      text-overflow: ellipsis; white-space: nowrap;
+    }
+    .image-import-row input {
+      flex: 1 1 200px; min-width: 150px; padding: 6px 9px;
+      border: 1px solid var(--line); border-radius: 7px; background: var(--bg);
+    }
+    .image-import-row .row-status {
+      flex: 1 1 160px; font-size: 12px; color: var(--muted);
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="top">
+      <div class="title">
+        <h1>KARDS 手动卡组</h1>
+        <span>网页和聊天指令共享同一份卡组</span>
+      </div>
+      <div class="toolbar">
+        <button class="btn" id="btn-refresh">刷新</button>
+        <button class="btn danger" id="btn-clear">清空</button>
+        <button class="btn primary" id="btn-render">生成图片</button>
+      </div>
+    </div>
+
+    <div class="grid">
+      <section class="card">
+        <div class="card-head">
+          <h2>卡牌库</h2>
+          <div class="head-tools">
+            <span class="muted" id="catalog-count">-</span>
+            <button class="btn small" id="btn-alias-library">别名库</button>
+          </div>
+        </div>
+        <div class="card-body">
+          <div class="filter-grid">
+            <input class="search" id="name-search" placeholder="名称：中文 / 英文 / ID（忽略空格）" />
+            <input class="search" id="alias-search" placeholder="别名搜索" />
+            <input class="search" id="keyword-search" list="keyword-options" placeholder="关键字 / 卡牌描述" />
+            <select id="type-filter">
+              <option value="">全部类型</option>
+            </select>
+            <select id="rarity-filter">
+              <option value="">全部稀有度</option>
+            </select>
+          </div>
+          <datalist id="keyword-options"></datalist>
+          <div class="filter-grid">
+            <label class="range">费用
+              <input type="number" id="cost-min" min="0" placeholder="最低" />
+              <span>-</span>
+              <input type="number" id="cost-max" min="0" placeholder="最高" />
+            </label>
+            <label class="range">攻击
+              <input type="number" id="attack-min" min="0" placeholder="最低" />
+              <span>-</span>
+              <input type="number" id="attack-max" min="0" placeholder="最高" />
+            </label>
+            <label class="range">防御
+              <input type="number" id="defense-min" min="0" placeholder="最低" />
+              <span>-</span>
+              <input type="number" id="defense-max" min="0" placeholder="最高" />
+            </label>
+          </div>
+          <div class="chips" id="faction-chips"></div>
+          <div class="filter-actions">
+            <span class="muted">名称搜索忽略空格；名称、别名、关键字可组合筛选；费用/攻击/防御支持范围</span>
+            <button class="btn small" id="btn-reset-filters">重置筛选</button>
+          </div>
+          <div class="alias-panel hidden" id="alias-library"></div>
+          <div class="catalog" id="catalog"></div>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <h2>当前卡组</h2>
+          <span class="muted" id="deck-owner"></span>
+          <span class="muted" id="deck-updated"></span>
+        </div>
+        <div class="card-body">
+          <div class="filter-grid">
+            <select id="main-faction">
+              <option value="">主国：自动</option>
+            </select>
+            <select id="ally-faction">
+              <option value="">盟国：自动</option>
+            </select>
+          </div>
+          <div class="summary">
+            <div class="stat"><b id="stat-total">0</b><span>主卡组张数</span></div>
+            <div class="stat"><b id="stat-hq">1</b><span>总部（码外）</span></div>
+            <div class="stat"><b id="stat-kinds">0</b><span>卡牌种类</span></div>
+          </div>
+          <div class="deck-list" id="deck-list"></div>
+          <div class="warn hidden" id="deck-warn"></div>
+          <div class="code-box hidden" id="deck-code"></div>
+        </div>
+      </section>
+    </div>
+
+    <section class="card import-card">
+      <div class="card-head">
+        <h2>卡牌更新</h2>
+        <span class="muted">导入官方新卡，立即生效</span>
+      </div>
+      <div class="card-body">
+        <p class="muted">
+          上传卡图并填写卡牌 ID（官方图片文件名，例如
+          <code>101_infantry_regiment</code>），会自动识别中文名、阵营、类型、
+          稀有度、费用、攻击、防御、描述和关键字，并把卡图保存为本地缩略图。
+          稀有度按卡面底部中央的小方块判读：4 灰为普通（Standard）、3 黄为限定（Limited）、
+          2 银带星为特殊（Special）、1 金带星为精英（Elite）；没有稀有度标识的是衍生牌（Token）。
+          上传图片会先自动裁掉卡图外的无关内容；若一张图里有多张卡，会逐张识别，
+          第一张使用下方填写的 ID，其余使用临时 ID（可用 kards setid 改永久 ID）。
+        </p>
+        <input type="file" id="card-image-files" accept="image/*" multiple />
+        <div class="image-import-list" id="image-import-list"></div>
+        <div class="filter-actions">
+          <select id="vision-provider"></select>
+          <button class="btn primary" id="btn-import-image">识别并导入</button>
+          <span class="import-status" id="image-import-status"></span>
+        </div>
+
+        <details style="margin-top: 18px">
+          <summary class="muted" style="cursor: pointer">高级：直接导入 JSON</summary>
+          <p class="muted">
+            支持 Fards 格式的 cards.json 数组，或 <code>{"cards": [...]}</code>。
+            导入前会自动备份 deck_cards.json，新卡会立刻出现在卡牌库和搜索里。
+          </p>
+          <input type="file" id="import-file" accept=".json,application/json" />
+          <textarea id="import-json" placeholder='粘贴卡牌 JSON，例如：
+[{"importId":"Zz","cardId":"new_card","nameZh":"新卡","nameEn":"NEW CARD","faction":"Germany","type":"infantry","rarity":"Elite","kredits":2,"operationCost":1,"attack":2,"defense":3,"description":"部署：抽 1 张牌。","keywordsNormalized":["blitz"]}]'></textarea>
+          <div class="filter-actions">
+            <button class="btn primary" id="btn-import">导入卡牌</button>
+            <span class="import-status" id="import-status"></span>
+          </div>
+        </details>
+      </div>
+    </section>
+
+    <section class="card preview hidden" id="preview">
+      <div class="card-head">
+        <h2>生成结果</h2>
+        <button class="btn" id="btn-copy">复制卡组码</button>
+      </div>
+      <div class="card-body">
+        <img id="preview-cards" alt="卡图" />
+        <img id="preview-info" alt="信息图" />
+      </div>
+    </section>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <script>
+    (function () {
+      const api = window.AstrBotPluginView;
+      const FACTION_COLORS = {
+        Germany: "#5b6b7d", Britain: "#3f7f5a", Japan: "#b4534b",
+        Soviet: "#a33a3a", USA: "#3d6fa8", France: "#4f6f9f",
+        Italy: "#4f8a6a", Poland: "#8a5aa8", Finland: "#4d7f8a",
+        Anzac: "#9a7a3a", Neutral: "#6b7280",
+      };
+      const state = {
+        catalog: [], factions: [], types: [], rarities: [], keywords: [],
+        fixFields: [],
+        deck: null,
+        nameQuery: "", aliasQuery: "", keywordQuery: "",
+        faction: "", type: "", rarity: "",
+        costMin: null, costMax: null,
+        attackMin: null, attackMax: null,
+        defenseMin: null, defenseMax: null,
+        limit: 120, renderedCode: "",
+        expanded: new Set(), fixExpanded: new Set(), aliasPanelOpen: false,
+      };
+
+      const $ = (id) => document.getElementById(id);
+      const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, (c) => (
+        { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]
+      ));
+      const compact = (s) => String(s == null ? "" : s).toLowerCase().replace(/\s+/g, "");
+
+      let toastTimer = null;
+      function toast(message) {
+        const el = $("toast");
+        el.textContent = message;
+        el.classList.add("show");
+        clearTimeout(toastTimer);
+        toastTimer = setTimeout(() => el.classList.remove("show"), 2200);
+      }
+
+      async function get(endpoint, params) {
+        return api.apiGet(endpoint, params);
+      }
+      async function post(endpoint, body) {
+        return api.apiPost(endpoint, body || {});
+      }
+
+      function factionLabel(value) {
+        const hit = state.factions.find((f) => f.value === value);
+        return hit ? hit.label : (value || "未知");
+      }
+
+      function numberValue(id) {
+        const raw = $(id).value.trim();
+        if (raw === "") return null;
+        const value = Number(raw);
+        return Number.isFinite(value) ? value : null;
+      }
+
+      function matches(card) {
+        if (state.faction && card.faction !== state.faction) return false;
+        if (state.type && card.type !== state.type) return false;
+        if (state.rarity && card.rarity !== state.rarity) return false;
+
+        const nameQuery = compact(state.nameQuery);
+        if (nameQuery) {
+          const haystack = compact([card.name, card.name_en, card.id, card.card_id].join(" "));
+          if (!haystack.includes(nameQuery)) return false;
+        }
+
+        const aliasQuery = compact(state.aliasQuery);
+        if (aliasQuery) {
+          const aliases = (card.aliases || []).map((v) => compact(v));
+          if (!aliases.some((v) => v.includes(aliasQuery))) return false;
+        }
+
+        const keywordQuery = state.keywordQuery.toLowerCase();
+        if (keywordQuery) {
+          const haystack = [
+            card.description || "",
+            ...(card.keywords || []),
+            ...(card.keywords_cn || []),
+          ].join(" ").toLowerCase();
+          if (!haystack.includes(keywordQuery)) return false;
+        }
+
+        const ranges = [
+          [card.cost, state.costMin, state.costMax],
+          [card.attack, state.attackMin, state.attackMax],
+          [card.defense, state.defenseMin, state.defenseMax],
+        ];
+        for (const [value, min, max] of ranges) {
+          if (min != null && (value == null || value < min)) return false;
+          if (max != null && (value == null || value > max)) return false;
+        }
+        return true;
+      }
+
+      function renderFactionChips() {
+        const box = $("faction-chips");
+        const all = [{ value: "", label: "全部阵营" }].concat(state.factions);
+        box.innerHTML = all.map((f) => (
+          `<button class="chip ${state.faction === f.value ? "on" : ""}" data-faction="${esc(f.value)}">${esc(f.label)}</button>`
+        )).join("");
+        box.querySelectorAll(".chip").forEach((btn) => {
+          btn.addEventListener("click", () => {
+            state.faction = btn.dataset.faction;
+            state.limit = 120;
+            renderFactionChips();
+            renderCatalog();
+          });
+        });
+      }
+
+      function renderSelect(id, options, placeholder, value) {
+        const select = $(id);
+        select.innerHTML = `<option value="">${esc(placeholder)}</option>`
+          + options.map((item) => (
+            `<option value="${esc(item.value)}">${esc(item.label)}</option>`
+          )).join("");
+        select.value = value;
+      }
+
+      function renderTypeFilter() {
+        renderSelect("type-filter", state.types, "全部类型", state.type);
+      }
+
+      function renderRarityFilter() {
+        renderSelect("rarity-filter", state.rarities, "全部稀有度", state.rarity);
+      }
+
+      function renderKeywordOptions() {
+        $("keyword-options").innerHTML = state.keywords
+          .map((item) => `<option value="${esc(item.label)}"></option>`)
+          .join("");
+      }
+
+      function aliasEditor(card) {
+        const chips = (card.aliases || []).map((alias) => (
+          `<span class="alias-chip">${esc(alias)}<button data-alias-remove="${esc(card.id)}" data-alias="${esc(alias)}" title="删除别名">×</button></span>`
+        )).join("") || '<span class="muted">暂无别名</span>';
+        return `<div class="alias-editor">
+          <span class="muted">别名：</span>
+          ${chips}
+          <input class="alias-input" data-alias-input="${esc(card.id)}" placeholder="输入别名后回车" />
+          <button class="mini" data-alias-add="${esc(card.id)}" title="添加别名">+</button>
+        </div>`;
+      }
+
+      function bindAliasButtons(container) {
+        container.querySelectorAll("[data-alias-remove]").forEach((btn) => {
+          btn.addEventListener("click", () => removeAlias(btn.dataset.aliasRemove, btn.dataset.alias));
+        });
+        container.querySelectorAll("[data-alias-add]").forEach((btn) => {
+          btn.addEventListener("click", () => {
+            const editor = btn.closest(".alias-editor");
+            const input = editor ? editor.querySelector("[data-alias-input]") : null;
+            addAlias(btn.dataset.aliasAdd, input ? input.value : "");
+          });
+        });
+        container.querySelectorAll("[data-alias-input]").forEach((input) => {
+          input.addEventListener("keydown", (event) => {
+            if (event.key !== "Enter") return;
+            event.preventDefault();
+            addAlias(input.dataset.aliasInput, input.value);
+          });
+        });
+      }
+
+      const FALLBACK_FIX_FIELDS = [
+        ["name_zh", "中文名"], ["name_en", "英文名"], ["faction", "阵营"],
+        ["type", "类型"], ["rarity", "稀有度"], ["cost", "费用"],
+        ["operation_cost", "行动费用"], ["attack", "攻击"], ["defense", "防御"],
+        ["description", "描述"], ["keywords", "关键字"], ["tags", "标签"],
+      ];
+
+      function currentFieldValue(card, field) {
+        const map = {
+          name_zh: card.name, name_en: card.name_en, faction: card.faction,
+          type: card.type, rarity: card.rarity, cost: card.cost,
+          operation_cost: card.operation, attack: card.attack,
+          defense: card.defense, description: card.description,
+          keywords: (card.keywords || []).join("、"), tags: "",
+        };
+        const value = map[field];
+        return value == null ? "" : value;
+      }
+
+      function renderFixValueControl(card, field) {
+        // Rarity is a closed set; pick it from a list instead of typing.
+        if (field === "rarity") {
+          const current = currentFieldValue(card, field);
+          const options = state.rarities.map((item) => (
+            `<option value="${esc(item.value)}"${item.value === current ? " selected" : ""}>${esc(item.label)}</option>`
+          )).join("");
+          return `<select data-fix-value="${esc(card.id)}">${options}</select>`;
+        }
+        return `<input data-fix-value="${esc(card.id)}" placeholder="输入新值" />`;
+      }
+
+      function fixEditor(card) {
+        const fields = state.fixFields.length ? state.fixFields : FALLBACK_FIX_FIELDS.map(
+          ([value, label]) => ({ value, label }),
+        );
+        const options = fields.map((item) => (
+          `<option value="${esc(item.value)}">${esc(item.label)}</option>`
+        )).join("");
+        const defaultField = fields.length ? fields[0].value : "name_zh";
+        return `<div class="fix-editor">
+          <span class="muted">修正字段：</span>
+          <select data-fix-field="${esc(card.id)}">${options}</select>
+          <span data-fix-control="${esc(card.id)}">${renderFixValueControl(card, defaultField)}</span>
+          <button class="mini" data-fix-save="${esc(card.id)}" title="保存修改">保存</button>
+        </div>`;
+      }
+
+      function bindFixButtons(container) {
+        container.querySelectorAll("[data-fix-field]").forEach((select) => {
+          const syncValueControl = () => {
+            const id = select.dataset.fixField;
+            const card = state.catalog.find((item) => item.id === id);
+            const holder = container.querySelector(`[data-fix-control="${id}"]`);
+            if (!card || !holder) return;
+            holder.innerHTML = renderFixValueControl(card, select.value);
+            const control = holder.querySelector("[data-fix-value]");
+            if (control) control.value = currentFieldValue(card, select.value);
+          };
+          select.addEventListener("change", syncValueControl);
+          syncValueControl();
+        });
+        container.querySelectorAll("[data-fix-save]").forEach((btn) => {
+          btn.addEventListener("click", () => {
+            const id = btn.dataset.fixSave;
+            const fieldSelect = container.querySelector(`[data-fix-field="${id}"]`);
+            const valueInput = container.querySelector(`[data-fix-value="${id}"]`);
+            saveFix(id, fieldSelect ? fieldSelect.value : "", valueInput ? valueInput.value : "");
+          });
+        });
+        container.querySelectorAll("[data-fix-value]").forEach((input) => {
+          input.addEventListener("keydown", (event) => {
+            if (event.key !== "Enter") return;
+            event.preventDefault();
+            const id = input.dataset.fixValue;
+            const fieldSelect = container.querySelector(`[data-fix-field="${id}"]`);
+            saveFix(id, fieldSelect ? fieldSelect.value : "", input.value);
+          });
+        });
+      }
+
+      function renderCatalog() {
+        const hits = state.catalog.filter(matches);
+        // With no active filter, show the whole catalog instead of paginating.
+        const noFilters = !state.nameQuery && !state.aliasQuery && !state.keywordQuery
+          && !state.faction && !state.type && !state.rarity
+          && state.costMin == null && state.costMax == null
+          && state.attackMin == null && state.attackMax == null
+          && state.defenseMin == null && state.defenseMax == null;
+        const shown = noFilters ? hits : hits.slice(0, state.limit);
+        $("catalog-count").textContent = `${hits.length} 张匹配`;
+        const box = $("catalog");
+        if (!shown.length) {
+          box.innerHTML = '<div class="empty">没有匹配的卡牌，试试放宽筛选条件</div>';
+          return;
+        }
+        box.innerHTML = shown.map((c) => {
+          const color = FACTION_COLORS[c.faction] || "#6b7280";
+          const cost = c.cost == null ? "?" : c.cost;
+          const sub = [c.faction_cn || c.faction, c.type_cn || c.type, c.rarity_cn || c.rarity]
+            .filter(Boolean).join(" · ");
+          const tags = (c.keywords_cn || []).map((tag) => (
+            `<span class="tag">${esc(tag)}</span>`
+          )).join("");
+          const expanded = state.expanded.has(c.id);
+          return `<div class="row-wrap">
+            <div class="row" data-id="${esc(c.id)}" title="${esc(c.description || "")}">
+              <span class="faction-dot" style="background:${color}"></span>
+              <span class="cost">${esc(cost)}K</span>
+              <span class="row-main">
+                <span class="row-name">${esc(c.name)}</span>
+                <span class="row-sub">${esc(sub)}</span>
+                ${c.description ? `<span class="row-desc">${esc(c.description)}</span>` : ""}
+                ${tags ? `<span class="row-tags">${tags}</span>` : ""}
+              </span>
+              <button class="mini" data-toggle-alias="${esc(c.id)}" title="编辑别名">${expanded ? "×" : "别"}</button>
+              <button class="mini" data-toggle-fix="${esc(c.id)}" title="修改卡牌字段">修</button>
+              ${c.rarity === "Token"
+                ? `<button class="mini" disabled title="衍生牌不可加入卡组">+</button>`
+                : `<button class="mini" data-add="${esc(c.id)}" title="添加一张">+</button>`}
+            </div>
+            ${expanded ? aliasEditor(c) : ""}
+            ${state.fixExpanded.has(c.id) ? fixEditor(c) : ""}
+          </div>`;
+        }).join("");
+        if (hits.length > shown.length) {
+          const more = document.createElement("button");
+          more.className = "btn";
+          more.textContent = `继续显示（还有 ${hits.length - shown.length} 张）`;
+          more.addEventListener("click", () => {
+            state.limit += 120;
+            renderCatalog();
+          });
+          box.appendChild(more);
+        }
+        box.querySelectorAll("[data-add]").forEach((btn) => {
+          btn.addEventListener("click", () => addCard(btn.dataset.add));
+        });
+        box.querySelectorAll("[data-toggle-alias]").forEach((btn) => {
+          btn.addEventListener("click", () => {
+            const id = btn.dataset.toggleAlias;
+            if (state.expanded.has(id)) state.expanded.delete(id);
+            else state.expanded.add(id);
+            renderCatalog();
+          });
+        });
+        box.querySelectorAll("[data-toggle-fix]").forEach((btn) => {
+          btn.addEventListener("click", () => {
+            const id = btn.dataset.toggleFix;
+            if (state.fixExpanded.has(id)) state.fixExpanded.delete(id);
+            else state.fixExpanded.add(id);
+            renderCatalog();
+          });
+        });
+        bindAliasButtons(box);
+        bindFixButtons(box);
+      }
+
+      function renderAliasLibrary() {
+        const entries = state.catalog.filter((card) => (card.aliases || []).length);
+        const total = entries.reduce((sum, card) => sum + card.aliases.length, 0);
+        $("btn-alias-library").textContent = `别名库 (${total})`;
+        const box = $("alias-library");
+        if (!state.aliasPanelOpen) {
+          box.classList.add("hidden");
+          return;
+        }
+        box.classList.remove("hidden");
+        if (!entries.length) {
+          box.innerHTML = '<div class="empty">还没有别名，点卡牌右侧的「别」按钮添加</div>';
+          return;
+        }
+        box.innerHTML = `<div class="alias-panel-head">共 ${total} 条别名</div>`
+          + entries.map((card) => `<div class="alias-panel-row">
+              <span class="alias-card-name">${esc(card.name)}</span>
+              <span class="alias-chip-list">${card.aliases.map((alias) => (
+                `<span class="alias-chip">${esc(alias)}<button data-alias-remove="${esc(card.id)}" data-alias="${esc(alias)}" title="删除别名">×</button></span>`
+              )).join("")}</span>
+            </div>`).join("");
+        bindAliasButtons(box);
+      }
+
+      function renderDeck() {
+        const deck = state.deck;
+        if (!deck) return;
+        const mainSelect = $("main-faction");
+        const allySelect = $("ally-faction");
+        const options = state.factions.map((f) => (
+          `<option value="${esc(f.value)}">${esc(f.label)}</option>`
+        )).join("");
+        mainSelect.innerHTML = '<option value="">主国：自动</option>' + options;
+        allySelect.innerHTML = '<option value="">盟国：自动</option>' + options;
+        mainSelect.value = deck.main || "";
+        allySelect.value = deck.ally || "";
+
+        const total = deck.cards.reduce((sum, c) => sum + c.count, 0);
+        $("stat-total").textContent = total;
+        $("stat-hq").textContent = "1";
+        $("stat-kinds").textContent = deck.cards.length;
+        $("deck-owner").textContent = deck.user ? `当前用户：${deck.user}` : "";
+        $("deck-updated").textContent = deck.updated
+          ? "更新于 " + new Date(deck.updated * 1000).toLocaleString()
+          : "";
+
+        const warn = $("deck-warn");
+        if (deck.warnings && deck.warnings.length) {
+          warn.textContent = deck.warnings.join("；");
+          warn.classList.remove("hidden");
+        } else {
+          warn.classList.add("hidden");
+        }
+
+        const list = $("deck-list");
+        if (!deck.cards.length) {
+          list.innerHTML = '<div class="empty">卡组还是空的，从左边添加卡牌，或在聊天里发送 kards add 卡名</div>';
+          return;
+        }
+        list.innerHTML = deck.cards.map((c) => {
+          const color = FACTION_COLORS[c.faction] || "#6b7280";
+          return `<div class="deck-row">
+            <span class="faction-dot" style="background:${color}"></span>
+            <span class="row-main">
+              <span class="row-name">${esc(c.name)}</span>
+              <span class="row-sub">${esc(c.faction_cn || c.faction)} · ${esc(c.cost == null ? "?" : c.cost)}K</span>
+            </span>
+            <span class="count-pill">${c.count}</span>
+            <button class="mini" data-dec="${esc(c.id)}" title="移除一张">−</button>
+            <button class="mini" data-inc="${esc(c.id)}" title="再加一张">+</button>
+          </div>`;
+        }).join("");
+        list.querySelectorAll("[data-dec]").forEach((btn) => {
+          btn.addEventListener("click", () => removeCard(btn.dataset.dec));
+        });
+        list.querySelectorAll("[data-inc]").forEach((btn) => {
+          btn.addEventListener("click", () => addCard(btn.dataset.inc));
+        });
+      }
+
+      function applyDeck(deck) {
+        state.deck = deck;
+        renderDeck();
+      }
+
+      async function addCard(id) {
+        try {
+          applyDeck(await post("manual/add", { id, count: 1 }));
+          toast("已添加一张");
+        } catch (err) {
+          toast(err.message || "添加失败");
+        }
+      }
+
+      async function removeCard(id) {
+        try {
+          applyDeck(await post("manual/remove", { id, count: 1 }));
+          toast("已移除一张");
+        } catch (err) {
+          toast(err.message || "移除失败");
+        }
+      }
+
+      async function addAlias(id, alias) {
+        const text = String(alias || "").trim();
+        if (!text) {
+          toast("请输入别名");
+          return;
+        }
+        try {
+          const data = await post("manual/alias/add", { id, alias: text });
+          const card = state.catalog.find((item) => item.id === id);
+          if (card) card.aliases = data.aliases || [];
+          toast(data.message || "已添加别名");
+          renderCatalog();
+          renderAliasLibrary();
+        } catch (err) {
+          toast(err.message || "添加别名失败");
+        }
+      }
+
+      async function removeAlias(id, alias) {
+        try {
+          const data = await post("manual/alias/remove", { id, alias });
+          const card = state.catalog.find((item) => item.id === id);
+          if (card) card.aliases = data.aliases || [];
+          toast(data.message || "已删除别名");
+          renderCatalog();
+          renderAliasLibrary();
+        } catch (err) {
+          toast(err.message || "删除别名失败");
+        }
+      }
+
+      async function saveFix(id, field, value) {
+        if (!field) {
+          toast("请选择要修改的字段");
+          return;
+        }
+        try {
+          const data = await post("manual/cards/fix", { id, field, value });
+          toast(`已修改 ${data.name || id} 的${data.label || field}：${data.value == null ? "" : data.value}`);
+          await loadCatalog();
+        } catch (err) {
+          toast(err.message || "修改卡牌字段失败");
+        }
+      }
+
+      async function loadDeck() {
+        try {
+          applyDeck(await get("manual/deck"));
+        } catch (err) {
+          toast(err.message || "读取卡组失败");
+        }
+      }
+
+      function deriveOptions(cards, valueKey, labelKey, order) {
+        const seen = new Map();
+        cards.forEach((card) => {
+          const value = card[valueKey];
+          if (!value || seen.has(value)) return;
+          seen.set(value, card[labelKey] || value);
+        });
+        return Array.from(seen, ([value, label]) => ({ value, label }))
+          .sort((a, b) => {
+            const ai = order.indexOf(a.value);
+            const bi = order.indexOf(b.value);
+            return (ai < 0 ? 99 : ai) - (bi < 0 ? 99 : bi);
+          });
+      }
+
+      async function loadCatalog() {
+        try {
+          const response = await get("manual/catalog");
+          // The page bridge normally unwraps {status, data}; tolerate both
+          // shapes so older/newer dashboards keep working.
+          const data = (response && response.cards == null && response.data)
+            ? response.data
+            : (response || {});
+          state.catalog = data.cards || [];
+          state.factions = data.factions || [];
+          state.types = data.types || [];
+          state.rarities = data.rarities || [];
+          state.keywords = data.keywords || [];
+          state.fixFields = data.fix_fields || [];
+
+          if (!state.catalog.length) {
+            toast("卡牌库为空，请检查 deck_cards.json");
+          }
+          if (!state.factions.length) {
+            state.factions = deriveOptions(
+              state.catalog, "faction", "faction_cn",
+              ["Germany", "Britain", "Japan", "Soviet", "USA", "France",
+                "Italy", "Poland", "Finland", "Anzac", "Neutral"],
+            );
+          }
+          if (!state.types.length) {
+            state.types = deriveOptions(
+              state.catalog, "type", "type_cn",
+              ["infantry", "tank", "artillery", "fighter", "bomber", "order",
+                "countermeasure"],
+            );
+          }
+          if (!state.rarities.length) {
+            state.rarities = deriveOptions(
+              state.catalog, "rarity", "rarity_cn",
+              ["Standard", "Limited", "Special", "Elite"],
+            );
+          }
+
+          renderFactionChips();
+          renderTypeFilter();
+          renderRarityFilter();
+          renderKeywordOptions();
+          renderCatalog();
+          renderAliasLibrary();
+        } catch (err) {
+          toast(err.message || "读取卡牌库失败");
+        }
+      }
+
+      $("name-search").addEventListener("input", (e) => {
+        state.nameQuery = e.target.value.trim();
+        state.limit = 120;
+        renderCatalog();
+      });
+      $("alias-search").addEventListener("input", (e) => {
+        state.aliasQuery = e.target.value.trim();
+        state.limit = 120;
+        renderCatalog();
+      });
+      $("keyword-search").addEventListener("input", (e) => {
+        state.keywordQuery = e.target.value.trim();
+        state.limit = 120;
+        renderCatalog();
+      });
+      $("type-filter").addEventListener("change", (e) => {
+        state.type = e.target.value;
+        state.limit = 120;
+        renderCatalog();
+      });
+      $("rarity-filter").addEventListener("change", (e) => {
+        state.rarity = e.target.value;
+        state.limit = 120;
+        renderCatalog();
+      });
+      ["cost-min", "cost-max", "attack-min", "attack-max", "defense-min", "defense-max"]
+        .forEach((id) => {
+          $(id).addEventListener("input", () => {
+            state.costMin = numberValue("cost-min");
+            state.costMax = numberValue("cost-max");
+            state.attackMin = numberValue("attack-min");
+            state.attackMax = numberValue("attack-max");
+            state.defenseMin = numberValue("defense-min");
+            state.defenseMax = numberValue("defense-max");
+            state.limit = 120;
+            renderCatalog();
+          });
+        });
+      $("btn-reset-filters").addEventListener("click", () => {
+        state.nameQuery = "";
+        state.aliasQuery = "";
+        state.keywordQuery = "";
+        state.faction = "";
+        state.type = "";
+        state.rarity = "";
+        state.costMin = state.costMax = null;
+        state.attackMin = state.attackMax = null;
+        state.defenseMin = state.defenseMax = null;
+        ["name-search", "alias-search", "keyword-search",
+          "cost-min", "cost-max", "attack-min", "attack-max",
+          "defense-min", "defense-max"].forEach((id) => { $(id).value = ""; });
+        renderFactionChips();
+        renderTypeFilter();
+        renderRarityFilter();
+        renderCatalog();
+      });
+      $("btn-alias-library").addEventListener("click", () => {
+        state.aliasPanelOpen = !state.aliasPanelOpen;
+        renderAliasLibrary();
+      });
+      $("main-faction").addEventListener("change", async (e) => {
+        try {
+          applyDeck(await post("manual/set", {
+            main: e.target.value, ally: $("ally-faction").value,
+          }));
+          toast("已更新主国");
+        } catch (err) {
+          toast(err.message || "设置失败");
+        }
+      });
+      $("ally-faction").addEventListener("change", async (e) => {
+        try {
+          applyDeck(await post("manual/set", {
+            main: $("main-faction").value, ally: e.target.value,
+          }));
+          toast("已更新盟国");
+        } catch (err) {
+          toast(err.message || "设置失败");
+        }
+      });
+      $("btn-refresh").addEventListener("click", async () => {
+        await Promise.all([loadCatalog(), loadDeck()]);
+        toast("已刷新");
+      });
+      $("btn-clear").addEventListener("click", async () => {
+        if (!confirm("确定清空手动卡组吗？")) return;
+        try {
+          applyDeck(await post("manual/clear", {}));
+          $("preview").classList.add("hidden");
+          toast("已清空");
+        } catch (err) {
+          toast(err.message || "清空失败");
+        }
+      });
+      $("btn-render").addEventListener("click", async () => {
+        const btn = $("btn-render");
+        btn.disabled = true;
+        btn.textContent = "生成中…";
+        try {
+          const data = await post("manual/render", {});
+          $("preview-cards").src = data.cards;
+          $("preview-info").src = data.info;
+          state.renderedCode = data.code || "";
+          const codeBox = $("deck-code");
+          if (state.renderedCode) {
+            codeBox.textContent = state.renderedCode;
+            codeBox.classList.remove("hidden");
+          }
+          $("preview").classList.remove("hidden");
+          $("preview").scrollIntoView({ behavior: "smooth", block: "start" });
+          if (data.deck) applyDeck(data.deck);
+          toast("图片已生成");
+        } catch (err) {
+          toast(err.message || "生成失败");
+        } finally {
+          btn.disabled = false;
+          btn.textContent = "生成图片";
+        }
+      });
+      $("btn-copy").addEventListener("click", async () => {
+        if (!state.renderedCode) {
+          toast("先生成图片");
+          return;
+        }
+        try {
+          await navigator.clipboard.writeText(state.renderedCode);
+          toast("卡组码已复制");
+        } catch {
+          toast("复制失败，请手动选择卡组码");
+        }
+      });
+      $("import-file").addEventListener("change", async (e) => {
+        const file = e.target.files && e.target.files[0];
+        if (!file) return;
+        try {
+          $("import-json").value = await file.text();
+          toast("已读取文件，点击「导入卡牌」生效");
+        } catch {
+          toast("读取文件失败");
+        }
+      });
+      $("btn-import").addEventListener("click", async () => {
+        const text = $("import-json").value.trim();
+        if (!text) {
+          toast("请先粘贴 JSON 或选择文件");
+          return;
+        }
+        let payload;
+        try {
+          payload = JSON.parse(text);
+        } catch (err) {
+          toast("JSON 格式错误：" + err.message);
+          return;
+        }
+        let cards = payload;
+        if (Array.isArray(payload)) {
+          cards = payload;
+        } else if (payload && typeof payload === "object" && payload.cards != null) {
+          cards = payload.cards;
+        } else {
+          cards = [payload];
+        }
+        const btn = $("btn-import");
+        btn.disabled = true;
+        btn.textContent = "导入中…";
+        try {
+          const data = await post("manual/cards/import", { cards });
+          const status = `新增 ${data.added} · 更新 ${data.updated} · 未变 ${data.unchanged} · 共 ${data.total} 张`;
+          $("import-status").textContent = status + (data.backup ? " · 已备份" : "");
+          toast("卡牌导入完成");
+          await Promise.all([loadCatalog(), loadDeck()]);
+        } catch (err) {
+          toast(err.message || "导入失败");
+        } finally {
+          btn.disabled = false;
+          btn.textContent = "导入卡牌";
+        }
+      });
+
+      let imageFiles = [];
+
+      function imageIdFromName(name) {
+        return String(name || "")
+          .replace(/\.[^.]+$/, "")
+          .replace(/[^0-9A-Za-z_-]+/g, "_")
+          .replace(/^_+|_+$/g, "");
+      }
+
+      function renderImageImportRows() {
+        const box = $("image-import-list");
+        if (!imageFiles.length) {
+          box.innerHTML = "";
+          return;
+        }
+        box.innerHTML = imageFiles.map((item, index) => (
+          `<div class="image-import-row">
+            <img src="${esc(item.preview)}" alt="" />
+            <span class="file-name" title="${esc(item.file.name)}">${esc(item.file.name)}</span>
+            <input data-image-id="${index}" value="${esc(item.id)}" placeholder="卡牌 ID" />
+            <span class="row-status" data-image-status="${index}">待识别</span>
+          </div>`
+        )).join("");
+        box.querySelectorAll("[data-image-id]").forEach((input) => {
+          input.addEventListener("input", (e) => {
+            const item = imageFiles[Number(e.target.dataset.imageId)];
+            if (item) item.id = e.target.value.trim();
+          });
+        });
+      }
+
+      function setRowStatus(index, text) {
+        const el = document.querySelector(`[data-image-status="${index}"]`);
+        if (el) el.textContent = text;
+      }
+
+      function readFileAsDataUrl(file) {
+        return new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result);
+          reader.onerror = () => reject(reader.error || new Error("读取图片失败"));
+          reader.readAsDataURL(file);
+        });
+      }
+
+      async function loadVisionProviders() {
+        const select = $("vision-provider");
+        try {
+          const data = await get("manual/vision/providers");
+          const providers = (data && data.providers) || [];
+          select.innerHTML = providers.length
+            ? providers.map((item) => (
+              `<option value="${esc(item.id)}">${esc(item.id)}</option>`
+            )).join("")
+            : '<option value="">无可用视觉模型</option>';
+          if (data && data.default) select.value = data.default;
+        } catch (err) {
+          select.innerHTML = '<option value="">视觉模型读取失败</option>';
+        }
+      }
+
+      $("card-image-files").addEventListener("change", (e) => {
+        imageFiles.forEach((item) => URL.revokeObjectURL(item.preview));
+        imageFiles = Array.from(e.target.files || []).map((file) => ({
+          file,
+          id: imageIdFromName(file.name),
+          preview: URL.createObjectURL(file),
+        }));
+        renderImageImportRows();
+        $("image-import-status").textContent = imageFiles.length
+          ? `已选择 ${imageFiles.length} 张，请确认每张卡的 ID`
+          : "";
+      });
+
+      $("btn-import-image").addEventListener("click", async () => {
+        if (!imageFiles.length) {
+          toast("请先选择卡图");
+          return;
+        }
+        const btn = $("btn-import-image");
+        const provider = $("vision-provider").value;
+        btn.disabled = true;
+        btn.textContent = "识别中…";
+        let ok = 0;
+        let cardTotal = 0;
+        try {
+          for (let index = 0; index < imageFiles.length; index += 1) {
+            const item = imageFiles[index];
+            if (!item.id) {
+              setRowStatus(index, "请填写卡牌 ID");
+              continue;
+            }
+            setRowStatus(index, "识别中…");
+            try {
+              const image = await readFileAsDataUrl(item.file);
+              const data = await post("manual/cards/import-image", {
+                id: item.id,
+                image,
+                provider,
+              });
+              const results = data.results || [data];
+              const imported = results.filter((entry) => !entry.error);
+              const names = imported.map((entry) => {
+                const ex = entry.extracted || {};
+                const name = ex.name_zh || ex.name_en || entry.card_id || item.id;
+                const cost = ex.cost == null ? "?K" : `${ex.cost}K`;
+                return `${name} · ${cost}`;
+              });
+              const failed = results.filter((entry) => entry.error);
+              const status = names.length ? `已导入 ${names.join("；")}` : "未识别到卡牌";
+              setRowStatus(index, failed.length
+                ? `${status} · 失败 ${failed.length} 张`
+                : status);
+              ok += imported.length ? 1 : 0;
+              cardTotal += imported.length;
+            } catch (err) {
+              setRowStatus(index, "失败：" + (err.message || "识别失败"));
+            }
+          }
+          $("image-import-status").textContent = `完成 ${cardTotal} 张卡（${ok}/${imageFiles.length} 个文件）`;
+          if (ok) {
+            toast("卡图导入完成");
+            await Promise.all([loadCatalog(), loadDeck()]);
+          }
+        } finally {
+          btn.disabled = false;
+          btn.textContent = "识别并导入";
+        }
+      });
+
+      if (!api) {
+        $("catalog-count").textContent = "页面桥接未加载，请刷新重试";
+        return;
+      }
+      api.ready().then(() => {
+        loadCatalog();
+        loadDeck();
+        loadVisionProviders();
+      });
+    })();
+  </script>
+</body>
+</html>

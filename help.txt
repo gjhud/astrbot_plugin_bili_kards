@@ -1,0 +1,188 @@
+================================================================
+           BiliKards 帮助文档（帮助.txt）
+================================================================
+作者：Fma
+版本：v0.8.4
+日期：2026-11-16
+
+----------------------------------------------------------------
+  一、插件概览
+----------------------------------------------------------------
+BiliKards 是一个 KARDS B 站助手插件，包含两大核心功能：
+
+  A. 官方动态查询
+     - 查询 KARDS 官方最新动态、相关视频、关注数等
+     - 提取图文混排的正文、标题、封面图、转发原文链接
+     - 按段落分段并按帖发送，支持配图
+
+  B. 卡组代码解析与图像渲染
+     - 解析 KARDS 卡组导入码（%%<main><ally>|...）
+     - 将卡组拆解为卡牌条目，含阵营、类型、稀有度、费用等
+     - 自动渲染卡组信息图 + 卡牌全图
+
+----------------------------------------------------------------
+  二、配置项（位于 _conf_schema.json）
+----------------------------------------------------------------
+  kards_uid              插件 B 站 UID，默认 2127596945（KARDS官方）
+  max_items              单次展示动态条数，默认 5
+  cache_ttl              动态缓存时间（秒），0 表示不缓存，默认 300
+  send_pics              是否推送图片，关闭后动态只发文字，卡牌搜索也不附带卡图
+  max_pics_per_item      每条动态最多推送的图片数，0 表示不推送图片，默认 9
+  deck_image             卡组是否生成卡组图片，关闭后只发送文字卡表
+  vision_provider_id     卡图识别使用的视觉模型，默认 openai_1/Gemma-4-31B-IT
+                         识别失败或超时会自动回退到其他图片模型
+
+----------------------------------------------------------------
+  三、主要模块说明
+----------------------------------------------------------------
+1. bili_fetch.py
+   - B 站 API 通用封装（headers、请求重试、wbi 签名机制）
+   - 获取时空鉴权接口数据（mixin key、buv Cookie）
+   - 定义 B 站 API 地址：video、user、stat、search、popular、rank
+   - 封装 get_video、get_user、get_stat、search、popular、demo 等方法
+
+2. deck_code.py
+   - KARDS 卡组导入码解码器
+   - normalize_deck_code：处理链接、URL 编码、游戏保存码（~ 扩展处理）
+   - decode_deck_code：解码为 DecodedDeck，校验阵营、数量上限（40 卡不包括 HQ）
+   - format_deck：中文卡组摘要输出
+   - parse_and_format：解析 + 格式化一键调用
+
+3. deck_image.py
+   - 卡组解码后渲染图片：一张信息图 + 一张卡牌全图
+   - render_deck_images(deck) -> (cards_path, info_path)
+   - search_grid(items, name) -> 卡牌搜索网格图
+
+4. dynamic_fetch.py
+   - 动态客户端 DynamicClient
+   - _fetch_page：拉取最新动态，防 B 站风控（412/352 HTTP）
+   - _enrich：补全动态正文（提取转发原文、opus 详情）
+   - fetch(limit=5) 拉取最新动态并缓存
+
+5. dynamic_render.py
+   - blank_image()：在插件数据目录生成纯白占位图
+   - _pick_body / _pick_pics：提取动态的标题、正文、配图
+   - split_paragraphs：按行切段，丢弃空行，保留顺序
+   - group_segments：按段落+图片交错打包
+   - build_segments / render_plain：组装分段结果
+
+6. media_cache.py
+   - ImageCache：动态配图本地缓存
+   - _ensure_session、lookup：缓存命中时直接返回本地路径
+   - download：下载单张图到 cache_root/dynamic_id/ 下
+   - cache_item：缓存一条动态的全部配图（最多 9 张）
+   - build_sheets：一张图片转为长图（宽度 720，高度上限 10000）
+   - merge_pics：合并动态配图成少量长图
+
+7. manual_deck.py
+   - 手动卡组编辑：添加/移除/搜索卡牌、设置阵营、导入卡牌、别名管理
+   - 数据来源：数据目录 deck_cards.json（运行时卡表）、card_aliases.json（别名库）
+   - build_decoded：从本地卡组合成 DecodedDeck，供渲染使用
+   - search_cards / find_cards：多条件搜索卡牌
+   - set_permanent_id：为新导入卡牌生成 2 位临时 ID
+
+8. main.py
+   - BiliKards 主入口类
+   - 初始化 DynamicClient 与 ImageCache
+   - 处理所有聊天命令：kards deck / kards news / kards now / kards s
+   - 私聊卡图识别流（`kards import <id>` 后送图即识别导入）
+
+9. web_api.py
+   - WebUI 页面桥接接口
+   - recognize_card：接收卡图与 id，调用视觉模型识别后导入
+   - 路由：catalog / aliases / alias/add / alias/remove / cards/import
+       / cards/import-image / vision/providers / deck / add / remove / set / clear
+       / render / thumb
+
+----------------------------------------------------------------
+  四、核心业务流程
+----------------------------------------------------------------
+一、卡组解析流程：
+  用户输入解码器 → normalize_deck_code
+            → strip 编码值、URL 参数 → strip extended（~扩展、补分号）
+            → 以 %% 开头 → decode_deck_code
+                 → 验证阵营编号（FACTION_CODE 映射 10 种）
+                 → 按 "; " 拆分组，按 2 位短码拆解
+                 → 计数 → 缺卡补空卡
+                 → 按阵营/稀有度排序 → 校验：主卡组共 39 张（标准 40 含 HQ）
+                 → 输出 DecodedDeck（含主/盟阵营、所有卡组条目、校验 warning）
+
+二、卡组渲染流程：
+  manual_deck.build_decoded(deck) → deck_image.render_deck_images(deck)
+       → 渲染两张图（信息图卡组 + 卡牌全图）
+
+三、动态查询流程：
+  用户发“kards news <n>” 或“kards news list”
+       → DynamicClient.fetch(limit) 拉取最新动态
+       → _enrich 填充全文 + 配图
+       → group_segments 拆段并搭配配图
+       → 以“序号. 【标签】时间 标题”格式逐段链发
+
+四、卡图识别流程：
+  私聊：`kards import <卡牌ID>` → 记录 pending → 收卡图 → 发送“再发一张”
+       → card_crop 裁掉卡图外内容，多张卡拆成单张
+       → web_api.recognize_card 每张卡分别调用视觉模型识别 JSON
+       → import_cards 合并进本地卡表（额外卡用 DIY- 临时 ID）
+       → 显示逐张导入结果
+
+----------------------------------------------------------------
+  五、命令速查
+----------------------------------------------------------------
+  kards deck 码组码      解析卡组码 + 卡图 + 信息图
+  kards news <n>        看倒数第 n 条动态（1-20）
+  kards news list       列出动态标题和序号
+  kards now <关键词>     搜索 KARDS 相关视频
+  kards s <关键词>      搜索本地卡表（含别名/描述/标签/属性）
+                         超过 15 张自动分页，发 # 查看下一页
+  kards alias 卡名 ～ 别名  给卡牌加别名
+  kards alias list       查看别名库
+  kards alias del 别名   删除别名
+  kards import [JSON]   导入官方新卡牌
+  kards import <ID>     私聊：先发指令，再发卡图自动识别导入
+  kards fix <字段> <新值>              修改刚导入卡牌的识别错误
+  kards fix <卡牌> <字段> <新值>       修改指定卡牌字段
+  kards setid 临时ID/卡名 永久ID       设置新卡永久 ID
+  kards add 卡名 [x2]   手动卡组加卡（衍生牌不可加入）
+  kards del 卡名 [x2]   手动卡组删卡
+  kards list / show     查看手动卡组文字 / 图片
+  kards clear           清空手动卡组
+  kards setmain 国家 / setally 国家  设置手动卡组主国 / 盟国
+                          卡组按用户隔离（聊天按平台+发送者，网页按账号）
+  kards 刷新动态         跳过缓存，重新拉取官方动态
+
+----------------------------------------------------------------
+  六、错误提示示例
+----------------------------------------------------------------
+  - 卡组码必须以 %% 开头，或形如 53|...（| 也可写 ～）
+  - 卡组码缺少 | 分隔符（也可写 ～）
+  - 普通 ID 须为 2 位字母或数字（卡组码兼容）
+  - 找不到卡牌：未指定要设置永久 ID 的卡牌
+  - 导入失败：不能在 deck_cards.json 缺失的牌短码处手动添加
+  - 视觉模型调用失败：请在 AstrBot 中添加支持图片的模型，或填写 vision_provider_id
+
+----------------------------------------------------------------
+  七、文件路径速查
+----------------------------------------------------------------
+  插件目录：data/plugins/astrbot_plugin_bili_kards（只读代码与种子卡表）
+  数据目录：data/plugin_data/bilikards（全部运行时持久化数据）
+  运行时卡表：data/plugin_data/bilikards/deck_cards.json
+  别名库：data/plugin_data/bilikards/card_aliases.json
+  手动卡组：data/plugin_data/bilikards/manual_decks.sqlite3（旧 manual_deck.json 仅作初始迁移）
+  缓存根：data/plugin_data/bilikards/picture/（配图归档）
+  长图归档：data/plugin_data/bilikards/picture/_albums/
+  展示缩略：data/plugin_data/bilikards/deck_card_thumbs/
+  工具：tools/monitor_dynamics.py tools/sync_deck_cards.py
+  视图：views/manual_deck
+
+----------------------------------------------------------------
+  八、扩展说明
+----------------------------------------------------------------
+  - 更新日志：data/plugins/astrbot_plugin_bili_kards/update_log/
+  - 配置写入：main.py 读取 self.config 从 .json 加载
+  - 图片渲染依赖：PIL（图像缓存）、web_api 依赖 vision provider
+
+  若要查看完整 API 或编写新功能，阅读对应模块文件即可。
+
+================================================================
+  帮助结束
+================================================================

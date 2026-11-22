@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+data/
+picture/
+root/
+deck_cards.json.bak.*
+*.sqlite3
