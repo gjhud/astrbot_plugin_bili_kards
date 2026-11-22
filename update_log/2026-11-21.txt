@@ -105,3 +105,14 @@ Reason:
 Files:
   card_crop.py, web_api.py, main.py, views/manual_deck/index.html,
   README.md, help.txt, metadata.yaml
+
+
+2026-11-22 — v1.0.0 发布版本
+------------------------------------------------
+Action:
+  - 插件版本统一提升至 v1.0.0，代码、元数据、文档与发布包文件名同步。
+  - 保留已完成的数据目录迁移、官方关键词修正、衍生牌拦截与按用户隔离卡组。
+Reason:
+  - 插件已达到首个正式发布版本，便于市场与仓库版本标识保持一致。
+Files:
+  main.py, metadata.yaml, README.md, help.txt, update_log/2026-11-21.txt

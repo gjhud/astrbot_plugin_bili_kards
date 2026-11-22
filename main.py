@@ -217,7 +217,7 @@ def _dynamic_text(index, item):
     "bilikards",
     "Fma",
     "KARDS B站动态、视频查询与卡组代码图片解析",
-    "v0.8.4",
+    "v1.0.0",
 )
 class BiliKards(Star):
     def __init__(self, context, config=None):

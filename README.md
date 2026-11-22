@@ -5,7 +5,7 @@ KARDS 社区向 AstrBot 插件。它把 KARDS 官方 B 站动态、相关视频�
 
 - 插件名：`bilikards`（目录名 `astrbot_plugin_bili_kards`，两者都能用）
 - 作者：Fma
-- 当前版本：`v0.8.4`
+- 当前版本：`v1.0.0`
 - 运行环境：AstrBot `v4.x`、Python `3.10+`
 
 ## 功能一览
@@ -39,7 +39,7 @@ AStrBot/
 重启 AstrBot，日志出现下面两行即加载成功：
 
 ```text
-Plugin bilikards (v0.8.4) by Fma: ...
+Plugin bilikards (v1.0.0) by Fma: ...
 [bilikards] Manual deck Web API routes registered
 ```
 
