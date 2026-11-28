@@ -21,6 +21,7 @@ KARDS 社区向 AstrBot 插件。它把 KARDS 官方 B 站动态、相关视频�
 | 卡牌更新 | 插件页面 / `kards import` | 上传卡图自动识别，或导入官方新卡 JSON；不带参数会生成二位临时短码，识别后需“同意”才同步正式卡表 |
 | 本地卡表 | `deck_cards.json` | 1646 张卡的离线数据，含描述与关键字，解析卡组码不依赖网络 |
 | DIY 卡编辑器 | 插件页面 `diy_editor` / `kards diy` | 用真实 KARDS 模板出图：卡名/阵营/类型/稀有度/费用/攻防/描述/关键词/卡图，实时预览并保存设计；聊天端 `kards diy` 进入连续出图模式，单独发「退出」/`exit`/`结束` 或 `kards diy exit` 退出；`kards diy last` 继续最近一张、`kards diy new` 强制新建；不写入官方卡表 |
+| 管理员审核 | `kards review` / `kards approve` / `kards reject` | `import`、`confirm`、`cancel`、`fix`、`setid` 只有管理员可直接执行；其他人提交后进入审核队列，卡表不改动，由管理员批准或驳回 |
 
 ## 安装
 
@@ -321,7 +322,7 @@ kards import 101_infantry_regiment
 （1 分钟内发送卡图）
 ```
 
-1. 不带参数会随机生成二位 base62 短码，识别结果先存草稿；回复“同意”或 `kards confirm` 后才同步到正式卡表，`kards cancel` 放弃。指定 ID 时仍直接写入。
+1. 不带参数会随机生成二位 base62 短码，识别结果先存草稿；回复“同意”或 `kards confirm` 后才同步到正式卡表，`kards cancel` 放弃。指定 ID 时仍直接写入。以上命令均受下方「管理员权限与审核流程」约束。
 2. 机器人在当前会话记录该 ID，有效期 **1 分钟**；期间只有发命令的同一个发送者有效。
 3. 这 1 分钟内在该会话发送的卡图都会按该 ID 识别；每次识别会先裁掉卡图外的内容，
    若一张图里有多张卡则逐张识别，第一张用指令里的 ID，其余使用 `DIY-` 临时 ID。
@@ -333,6 +334,40 @@ kards import 101_infantry_regiment
 没有执行 `kards import <卡牌 ID>` 时，只有图片说明文字或文件名是**卡表里已有的卡牌 ID / 导入 ID**
 才会触发识别（例如 `101_infantry_regiment`、`01`）。随机文件名和机器人生成的拼图名会被忽略。
 全新卡牌 ID 请先用 `kards import <卡牌 ID>` 显式声明。
+
+### 管理员权限与审核流程
+
+会改动本地卡表或卡牌草稿的调用只有管理员能直接执行：
+
+| 受管控调用 | 聊天命令 | LLM 工具 |
+| --- | --- | --- |
+| 卡牌导入 | `kards import` | `kards_import` |
+| 确认写入卡表 | `kards confirm`、纯文本「同意」 | `kards_confirm` |
+| 放弃草稿 | `kards cancel`、纯文本「取消」 | `kards_cancel` |
+| 修改卡牌字段 | `kards fix <字段> <新值>` | `kards_fix` |
+| 设置永久 ID | `kards setid <临时ID> <永久ID>` | `kards_setid` |
+
+管理员判定同时看两处：AstrBot 事件的 `event.is_admin()`，以及 `data/cmd_config.json`
+里的 `admins_id`。两者任一命中即可直接执行。
+
+其他人执行上述调用时**不会写入卡表**，而是收到一个 `RV-` 开头的审核编号，
+请求进入 `data/plugin_data/bilikards/admin_reviews.json`。管理员按下面流程处理：
+
+```text
+kards review                 # 查看待审核列表
+kards approve RV-a1b2c3      # 批准：按原提交者身份执行该操作
+kards reject RV-a1b2c3       # 驳回：不改卡表、不改草稿
+kards approve RV-a1b2c3      # 对应 LLM 工具：kards_approve / kards_reject / kards_review
+```
+
+补充规则：
+
+- 附图导入在提交时就已完成识别并保存为草稿条目，批准后直接写入，管理员不需要重发图片。
+- `kards fix <卡牌>` 只查看字段，属于只读操作，所有人可用；只有带新值的修改才需要审核。
+- 审核记录保留 `pending` / `approved` / `rejected` 状态与处理人，重复批准或驳回会被拒绝。
+- 审核回放使用原提交者的 sender id，因此草稿确认、最近导入卡定位都按原提交者上下文生效。
+- 插件页面的 `manual/cards/import` 与 `manual/cards/import-image` 同样会写卡表，
+  但它们走 AstrBot 仪表盘登录鉴权（本身只有管理员能进仪表盘），不走 QQ 审核队列。
 
 ### 帮助
 

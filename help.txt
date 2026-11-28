@@ -134,6 +134,15 @@ BiliKards 是一个 KARDS B 站助手插件，包含两大核心功能：
        → 确认后 import_cards 合并进本地卡表
        → 显示逐张导入结果
 
+   管理员权限与审核流程：
+   - import / confirm / cancel / fix / setid 仅管理员可直接执行
+   - 管理员判定：AstrBot event.is_admin() 或 data\cmd_config.json 的 admins_id
+   - 其他用户执行上述命令不会改动卡表，而是生成 RV- 开头的审核编号
+   - 管理员用 kards review 查看待审，kards approve <编号> 批准，kards reject <编号> 驳回
+   - 附图导入在提交时已识别为草稿，批准后直接写入，无需重发图片
+   - 待审队列保存在 data\plugin_data\bilikards\admin_reviews.json
+   - kards fix <卡牌> 查看字段是只读操作，所有人可用
+
 ----------------------------------------------------------------
   五、命令速查
 ----------------------------------------------------------------
@@ -155,6 +164,8 @@ BiliKards 是一个 KARDS B 站助手插件，包含两大核心功能：
   kards fix <字段> <新值>              修改刚导入卡牌的识别错误
   kards fix <卡牌> <字段> <新值>       修改指定卡牌字段
   kards setid 临时ID/卡名 永久ID       设置新卡永久 ID
+  kards review           管理员查看待审核请求
+  kards approve <编号>   管理员批准（驳回用 kards reject <编号>）
   kards add 卡名 [x2]   手动卡组加卡（衍生牌不可加入）
   kards del 卡名 [x2]   手动卡组删卡
   kards list / show     查看手动卡组文字 / 图片

@@ -224,6 +224,164 @@ def _new_temp_card_id() -> str:
             return code
 
 
+# ---------------------------------------------------------------------------
+# Admin permission gate and review queue
+#
+# Operations that can change the shared card table (import / confirm / cancel /
+# setid / fix) are restricted to administrators.  Requests from other senders
+# are queued here instead of being applied, and an administrator approves or
+# rejects them with `kards approve` / `kards reject`.
+# ---------------------------------------------------------------------------
+
+
+def _load_admin_ids() -> set[str]:
+    """Read administrator sender ids from AstrBot's global configuration."""
+    ids: set[str] = set()
+    try:
+        config_path = data_paths.DATA_DIR.parent.parent / "cmd_config.json"
+        config = json.loads(config_path.read_text(encoding="utf-8-sig"))
+        raw = config.get("admins_id") or []
+        if isinstance(raw, str):
+            raw = [raw]
+        for value in raw:
+            if value:
+                ids.add(str(value))
+    except (OSError, ValueError, TypeError) as exc:
+        logger.debug("Read admins_id failed: %s", exc)
+    return ids
+
+
+def _is_admin(event: AstrMessageEvent) -> bool:
+    """Return True for AstrBot admins or configured administrator sender ids."""
+    try:
+        if event.is_admin():
+            return True
+    except Exception:
+        pass
+    return str(event.get_sender_id()) in _load_admin_ids()
+
+
+def _load_admin_reviews() -> dict[str, dict]:
+    try:
+        data = json.loads(data_paths.ADMIN_REVIEW_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {str(key): value for key, value in data.items() if isinstance(value, dict)}
+
+
+_admin_reviews: dict[str, dict] = _load_admin_reviews()
+
+
+def _save_admin_reviews() -> None:
+    try:
+        data_paths.ADMIN_REVIEW_FILE.parent.mkdir(parents=True, exist_ok=True)
+        temp = data_paths.ADMIN_REVIEW_FILE.with_suffix(".tmp")
+        temp.write_text(
+            json.dumps(_admin_reviews, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        temp.replace(data_paths.ADMIN_REVIEW_FILE)
+    except (OSError, TypeError, ValueError) as exc:
+        logger.warning("Failed to save admin review queue: %s", exc)
+
+
+def _queue_admin_review(
+    event, kind: str, detail: str = "", payload: dict | None = None
+) -> str:
+    """Queue a non-admin request and return its review id."""
+    review_id = "RV-" + secrets.token_hex(3).upper()
+    _admin_reviews[review_id] = {
+        "id": review_id,
+        "kind": kind,
+        "sender": str(event.get_sender_id()),
+        "session_id": str(event.get_session_id() or ""),
+        "detail": str(detail or ""),
+        "payload": payload or {},
+        "created_at": time.time(),
+        "status": "pending",
+    }
+    _save_admin_reviews()
+    return review_id
+
+
+def _require_admin(
+    event, kind: str, detail: str = "", payload: dict | None = None
+):
+    """Return ``(allowed, review_id)``; queue a review when not allowed."""
+    if _is_admin(event):
+        return True, ""
+    return False, _queue_admin_review(event, kind, detail, payload)
+
+
+def _find_admin_review(review_id: str):
+    """Look up a review id case-insensitively; return ``(key, entry)``."""
+    review_id = str(review_id or "").strip()
+    entry = _admin_reviews.get(review_id)
+    if entry:
+        return review_id, entry
+    upper = review_id.upper()
+    for key, item in _admin_reviews.items():
+        if key.upper() == upper:
+            return key, item
+    return review_id, None
+
+
+ADMIN_REVIEW_LABELS = {
+    "import": "卡牌导入",
+    "setid": "设置永久 ID",
+    "fix": "修改卡牌字段",
+    "confirm": "确认写入卡表",
+    "cancel": "放弃卡牌草稿",
+}
+
+
+def _admin_review_notice(review_id: str, kind: str, detail: str = "") -> str:
+    label = ADMIN_REVIEW_LABELS.get(kind, kind)
+    shown = str(detail or "（无）").strip()
+    if len(shown) > 200:
+        shown = shown[:200] + "…"
+    return (
+        f"【管理员审核】{label}需要管理员权限，已提交审核\n"
+        f"审核编号：{review_id}\n"
+        f"提交内容：{shown}\n"
+        f"管理员批准：kards approve {review_id}\n"
+        f"管理员驳回：kards reject {review_id}\n"
+        "查看待审：kards review"
+    )
+
+
+class _ReviewEvent:
+    """Event shim used to replay an approved request with the original sender."""
+
+    def __init__(self, event, sender: str, session_id: str = ""):
+        self._event = event
+        self._sender = str(sender or "")
+        self._session_id = str(session_id or "")
+        self.outputs: list[str] = []
+
+    def is_admin(self):
+        # An approved replay is executed with the administrator's authority.
+        return True
+
+    def get_sender_id(self):
+        return self._sender
+
+    def get_session_id(self):
+        return self._session_id or self._event.get_session_id()
+
+    def get_messages(self):
+        return []
+
+    def plain_result(self, text):
+        self.outputs.append(str(text))
+        return str(text)
+
+    def chain_result(self, chain):
+        self.outputs.append("（图片消息）")
+        return None
+
+
 DEFAULT_UID = "2127596945"
 DEFAULT_MAX_ITEMS = 5
 DEFAULT_CACHE_TTL = 300
@@ -255,6 +413,11 @@ MANUAL_DECK_SHOW_ALIASES = {"show", "render", "卡组图", "生成卡组图"}
 MANUAL_DECK_MAIN_ALIASES = {"setmain", "主国", "设置主国"}
 MANUAL_DECK_ALLY_ALIASES = {"setally", "盟国", "设置盟国"}
 MANUAL_DIY_ALIASES = {"diy", "diycard", "diykards", "自制卡", "diy卡"}
+MANUAL_CONFIRM_ALIASES = {"confirm", "确认导入", "同意导入"}
+MANUAL_CANCEL_ALIASES = {"cancel", "取消导入"}
+MANUAL_REVIEW_ALIASES = {"review", "reviews", "审核", "待审", "审核列表"}
+MANUAL_APPROVE_ALIASES = {"approve", "批准", "通过", "审核通过"}
+MANUAL_REJECT_ALIASES = {"reject", "驳回", "审核驳回"}
 # Field definitions live in manual_deck so the chat command and web page share
 # the same validation.
 FIX_FIELDS = manual_deck.FIX_FIELDS
@@ -272,6 +435,8 @@ HELP_TEXT = (
     "kards alias 卡名 ～ 别名            给卡牌加别名\n"
     "kards alias list                     查看别名库\n"
     "kards alias del 别名                 删除别名\n"
+    "【管理员权限】import / confirm / cancel / fix / setid 仅管理员可直接执行；\n"
+    "  其他用户提交后进入审核队列，由管理员批准或驳回\n"
     "kards import                         生成两位临时短码，发卡图后先出草稿\n"
     "kards import 卡牌ID/JSON/文件名      按指定 ID 导入，或发完整卡图自动识别\n"
     "kards confirm / 回复“同意”           把草稿同步到正式卡表（确认后才写入）\n"
@@ -279,6 +444,8 @@ HELP_TEXT = (
     "kards fix <字段> <新值>              修改刚导入卡牌的识别错误\n"
     "kards fix <卡牌> <字段> <新值>       修改指定卡牌的字段\n"
     "kards setid 临时ID/卡名 永久ID       设置新卡永久 ID（2 位字母/数字）\n"
+    "kards review                         管理员查看待审核请求\n"
+    "kards approve <审核编号>             管理员批准请求（也可 kards reject 驳回）\n"
     "kards add 卡名 [x2]                  手动卡组加卡（衍生牌不可加入）\n"
     "kards del 卡名 [x2]                  手动卡组删卡\n"
     "kards list / kards show              查看手动卡组文字 / 图片\n"
@@ -1047,6 +1214,10 @@ class BiliKards(Star):
         if len(parts) != 2:
             yield event.plain_result("用法：kards setid <临时ID或卡名> <永久ID>")
             return
+        allowed, review_id = _require_admin(event, "setid", text)
+        if not allowed:
+            yield event.plain_result(_admin_review_notice(review_id, "setid", text))
+            return
         target, new_id = parts[0].strip(), parts[1].strip()
         sender = str(event.get_sender_id())
         draft = _temp_drafts.get(sender)
@@ -1154,6 +1325,11 @@ class BiliKards(Star):
             yield event.plain_result("请填写新值。")
             return
 
+        allowed, review_id = _require_admin(event, "fix", text)
+        if not allowed:
+            yield event.plain_result(_admin_review_notice(review_id, "fix", text))
+            return
+
         if not ref:
             ref = _last_import.get(str(event.get_sender_id()), "")
             if not ref:
@@ -1190,6 +1366,36 @@ class BiliKards(Star):
 
     async def _manual_import(self, event: AstrMessageEvent, kw):
         text = (kw or "").strip()
+        allowed, review_id = _require_admin(event, "import", text)
+        if not allowed:
+            images = [item for item in event.get_messages() if isinstance(item, Image)]
+            if images:
+                try:
+                    image_path = await images[0].convert_to_file_path()
+                    image_data = Path(image_path).read_bytes()
+                    if (
+                        text
+                        and not text.startswith(("[", "{"))
+                        and re.fullmatch(r"[0-9A-Za-z_\-]+", text)
+                    ):
+                        review_card_id = text
+                    else:
+                        review_card_id = _new_temp_card_id()
+                    recognized = await web_api.recognize_card(
+                        image_data, review_card_id, commit=False
+                    )
+                    entries = recognized.get("draft_entries") or []
+                    review = _admin_reviews.get(review_id) or {}
+                    review.setdefault("payload", {})["preapproved_cards"] = entries
+                    review.setdefault("payload", {})["note"] = (
+                        f"附图识别 {len(entries)} 张，批准后直接写入卡表"
+                    )
+                    _admin_reviews[review_id] = review
+                    _save_admin_reviews()
+                except Exception as exc:
+                    self.logger.warning("Review image recognition failed: %s", exc)
+            yield event.plain_result(_admin_review_notice(review_id, "import", text))
+            return
         # `kards import <card_id>` arms this session for one minute.  Every image
         # from the same sender in the same session during that window is imported.
         if (
@@ -1864,6 +2070,11 @@ class BiliKards(Star):
             MANUAL_SEARCH_ALIASES
             | MANUAL_ALIAS_ALIASES
             | MANUAL_IMPORT_ALIASES
+            | MANUAL_CONFIRM_ALIASES
+            | MANUAL_CANCEL_ALIASES
+            | MANUAL_REVIEW_ALIASES
+            | MANUAL_APPROVE_ALIASES
+            | MANUAL_REJECT_ALIASES
             | MANUAL_SETID_ALIASES
             | MANUAL_FIX_ALIASES
             | MANUAL_DECK_ADD_ALIASES
@@ -1895,6 +2106,31 @@ class BiliKards(Star):
 
         if sub in MANUAL_IMPORT_ALIASES:
             async for result in self._manual_import(event, kw):
+                yield result
+            return
+
+        if sub in MANUAL_CONFIRM_ALIASES:
+            async for result in self._confirm_draft(event):
+                yield result
+            return
+
+        if sub in MANUAL_CANCEL_ALIASES:
+            async for result in self._cancel_draft(event):
+                yield result
+            return
+
+        if sub in MANUAL_REVIEW_ALIASES:
+            async for result in self._manual_review_list(event):
+                yield result
+            return
+
+        if sub in MANUAL_APPROVE_ALIASES:
+            async for result in self._manual_review_approve(event, kw):
+                yield result
+            return
+
+        if sub in MANUAL_REJECT_ALIASES:
+            async for result in self._manual_review_reject(event, kw):
                 yield result
             return
 
@@ -2072,6 +2308,11 @@ class BiliKards(Star):
     async def _confirm_draft(self, event: AstrMessageEvent):
         """Commit a recognized draft into the official local card table."""
         sender = str(event.get_sender_id())
+        detail = "待确认草稿 " + str((_temp_drafts.get(sender) or {}).get("temp_id", ""))
+        allowed, review_id = _require_admin(event, "confirm", detail)
+        if not allowed:
+            yield event.plain_result(_admin_review_notice(review_id, "confirm", detail))
+            return
         draft = _temp_drafts.pop(sender, None)
         if not draft or not draft.get("cards"):
             _save_temp_drafts()
@@ -2107,6 +2348,11 @@ class BiliKards(Star):
     async def _cancel_draft(self, event: AstrMessageEvent):
         """Discard the waiting card draft for this sender."""
         sender = str(event.get_sender_id())
+        detail = "待放弃草稿 " + str((_temp_drafts.get(sender) or {}).get("temp_id", ""))
+        allowed, review_id = _require_admin(event, "cancel", detail)
+        if not allowed:
+            yield event.plain_result(_admin_review_notice(review_id, "cancel", detail))
+            return
         draft = _temp_drafts.pop(sender, None)
         _save_temp_drafts()
         if not draft:
@@ -2114,6 +2360,111 @@ class BiliKards(Star):
             return
         yield event.plain_result(
             f"已放弃临时短码 {draft.get('temp_id', '')} 的卡牌草稿，卡表未改动。"
+        )
+
+    async def _manual_review_list(self, event: AstrMessageEvent):
+        """List requests waiting for administrator approval."""
+        if not _is_admin(event):
+            yield event.plain_result("审核列表仅管理员可用")
+            return
+        pending = [
+            item
+            for item in _admin_reviews.values()
+            if item.get("status") == "pending"
+        ]
+        if not pending:
+            yield event.plain_result("暂无待审核请求")
+            return
+        pending.sort(key=lambda item: item.get("created_at", 0))
+        lines = [f"待审核 {len(pending)} 条："]
+        for item in pending:
+            label = ADMIN_REVIEW_LABELS.get(item.get("kind"), item.get("kind"))
+            note = (item.get("payload") or {}).get("note") or ""
+            suffix = f"（{note}）" if note else ""
+            lines.append(
+                f"- {item['id']} [{label}] 提交者 {item.get('sender', '')}："
+                f"{item.get('detail', '')}{suffix}"
+            )
+        lines.append("批准：kards approve <编号>；驳回：kards reject <编号>")
+        yield event.plain_result("\n".join(lines))
+
+    async def _manual_review_approve(self, event: AstrMessageEvent, kw):
+        """Replay an approved request with the original sender's identity."""
+        if not _is_admin(event):
+            yield event.plain_result("审核操作仅管理员可用")
+            return
+        review_id, entry = _find_admin_review(kw)
+        if not entry:
+            yield event.plain_result("审核编号不存在：" + review_id)
+            return
+        if entry.get("status") != "pending":
+            yield event.plain_result(
+                f"审核 {review_id} 已处理（{entry.get('status')}）"
+            )
+            return
+        shim = _ReviewEvent(event, entry.get("sender", ""), entry.get("session_id", ""))
+        try:
+            payload = entry.get("payload") or {}
+            preapproved = payload.get("preapproved_cards")
+            if preapproved is not None:
+                summary = manual_deck.import_cards(preapproved)
+                shim.outputs.append(
+                    "卡牌导入完成（审核批准）："
+                    f"新增 {summary['added']} · 更新 {summary['updated']} · "
+                    f"未变 {summary['unchanged']}"
+                )
+            else:
+                kind = entry.get("kind")
+                if kind == "confirm":
+                    async for _ in self._confirm_draft(shim):
+                        pass
+                elif kind == "cancel":
+                    async for _ in self._cancel_draft(shim):
+                        pass
+                elif kind == "setid":
+                    async for _ in self._manual_set_id(shim, entry.get("detail", "")):
+                        pass
+                elif kind == "fix":
+                    async for _ in self._manual_fix(shim, entry.get("detail", "")):
+                        pass
+                elif kind == "import":
+                    async for _ in self._manual_import(shim, entry.get("detail", "")):
+                        pass
+                else:
+                    yield event.plain_result("未知审核类型：" + str(kind))
+                    return
+        except Exception as exc:
+            self.logger.warning("Approve admin review failed: %s", exc)
+            yield event.plain_result("批准失败：" + str(exc))
+            return
+        entry["status"] = "approved"
+        entry["approved_by"] = str(event.get_sender_id())
+        entry["resolved_at"] = time.time()
+        _save_admin_reviews()
+        lines = [f"已批准审核 {review_id}"]
+        lines.extend(shim.outputs or ["（无回执）"])
+        yield event.plain_result("\n".join(lines))
+
+    async def _manual_review_reject(self, event: AstrMessageEvent, kw):
+        """Reject a queued request without touching the card table."""
+        if not _is_admin(event):
+            yield event.plain_result("审核操作仅管理员可用")
+            return
+        review_id, entry = _find_admin_review(kw)
+        if not entry:
+            yield event.plain_result("审核编号不存在：" + review_id)
+            return
+        if entry.get("status") != "pending":
+            yield event.plain_result(
+                f"审核 {review_id} 已处理（{entry.get('status')}）"
+            )
+            return
+        entry["status"] = "rejected"
+        entry["rejected_by"] = str(event.get_sender_id())
+        entry["resolved_at"] = time.time()
+        _save_admin_reviews()
+        yield event.plain_result(
+            f"已驳回审核 {review_id}，卡表与草稿均未改动"
         )
 
     @filter.event_message_type(
@@ -2336,6 +2687,32 @@ class BiliKards(Star):
     async def tool_cancel(self, event: AstrMessageEvent):
         """取消上次识别后待确认的卡牌草稿。"""
         async for result in self._cancel_draft(event):
+            yield result
+
+    @llm_tool(name="kards_review")
+    async def tool_review(self, event: AstrMessageEvent):
+        """管理员查看待审核的卡牌操作请求。"""
+        async for result in self._manual_review_list(event):
+            yield result
+
+    @llm_tool(name="kards_approve")
+    async def tool_approve(self, event: AstrMessageEvent, review_id: str):
+        """管理员批准一条待审核请求，按原提交者身份执行。
+
+        Args:
+            review_id(string): 审核编号，如 RV-a1b2c3。
+        """
+        async for result in self._manual_review_approve(event, review_id):
+            yield result
+
+    @llm_tool(name="kards_reject")
+    async def tool_reject(self, event: AstrMessageEvent, review_id: str):
+        """管理员驳回一条待审核请求，不改动卡表。
+
+        Args:
+            review_id(string): 审核编号，如 RV-a1b2c3。
+        """
+        async for result in self._manual_review_reject(event, review_id):
             yield result
 
     async def terminate(self):

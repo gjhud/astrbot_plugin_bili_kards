@@ -1,5 +1,30 @@
 # bilikards 更新日志
 
+## 2026-11-28 管理员权限与审核流程（v2.0.0 增量）
+
+### 新增
+1. **管理员门禁**：`import`、`confirm`、`cancel`、`fix`、`setid` 五类会改动卡表或草稿的调用，
+   聊天命令与 LLM 工具统一要求管理员权限。管理员判定为 `event.is_admin()` 或
+   `data/cmd_config.json` 的 `admins_id` 命中。
+2. **审核队列**：非管理员调用不执行，改为在 `data/plugin_data/bilikards/admin_reviews.json`
+   生成 `RV-` 编号的待审记录，回执写明编号、提交内容与批准/驳回命令。
+3. **审核命令**：`kards review` 看待审列表，`kards approve <编号>` 批准，
+   `kards reject <编号>` 驳回；对应 LLM 工具 `kards_review`、`kards_approve`、`kards_reject`。
+4. **附图导入审核**：提交时以 `commit=False` 先识别并保存草稿条目，批准后直接写入，
+   管理员无需重发卡图。
+5. **按原提交者回放**：批准时用 `_ReviewEvent` 保留原 sender id 与会话 id，
+   草稿确认、最近导入卡定位都按原提交者上下文生效。
+6. **补齐命令分发**：帮助中已有的 `kards confirm` / `kards cancel` 此前没有真正分发，
+   现已可用；`kards fix <卡牌>` 查看字段仍为只读，所有人可用。
+
+### 改动文件
+- `main.py`：管理员判定、审核队列、门禁、审核命令与 LLM 工具、帮助文本。
+- `data_paths.py`：新增 `ADMIN_REVIEW_FILE`。
+- `README.md` / `help.txt`：补充权限说明与审核流程。
+
+### 验证
+- `py_compile` 通过，AstrBot 热重载通过；回归见本地测试脚本输出。
+
 ## 2026-11-28 v2.0.0 正式发布
 
 版本号从 `v1.0.0` 升至 `v2.0.0`，`metadata.yaml`、`main.py` 的 `@register`、`README.md`、

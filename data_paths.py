@@ -47,6 +47,7 @@ CARDS_FILE = DATA_DIR / "deck_cards.json"
 PENDING_IMPORT_FILE = DATA_DIR / "pending_imports.json"
 TEMP_IMPORT_FILE = DATA_DIR / "temp_import_ids.json"
 NEW_CARDS_FILE = DATA_DIR / "new_cards.json"
+ADMIN_REVIEW_FILE = DATA_DIR / "admin_reviews.json"
 
 THUMB_DIR = DATA_DIR / "deck_card_thumbs"
 CARD_CACHE_DIR = DATA_DIR / "deck_card_cache"
