@@ -5,7 +5,7 @@ KARDS 社区向 AstrBot 插件。它把 KARDS 官方 B 站动态、相关视频�
 
 - 插件名：`bilikards`（目录名 `astrbot_plugin_bili_kards`，两者都能用）
 - 作者：Fma
-- 当前版本：`v1.0.0`
+- 当前版本：`v2.0.0`
 - 运行环境：AstrBot `v4.x`、Python `3.10+`
 
 ## 功能一览
@@ -19,7 +19,8 @@ KARDS 社区向 AstrBot 插件。它把 KARDS 官方 B 站动态、相关视频�
 | 卡牌搜索 | 插件页面 / `kards s` | 按名称、别名、关键字、阵营、类型、稀有度、费用/攻防范围筛选；QQ 返回卡图拼图 |
 | 别名库 | 插件页面 / `kards alias` | 给卡牌起常用别名，聊天和页面搜索都能用 |
 | 卡牌更新 | 插件页面 / `kards import` | 上传卡图自动识别，或导入官方新卡 JSON；不带参数会生成二位临时短码，识别后需“同意”才同步正式卡表 |
-| 本地卡表 | `deck_cards.json` | 1647 张卡的离线数据，含描述与关键字，解析卡组码不依赖网络 |
+| 本地卡表 | `deck_cards.json` | 1646 张卡的离线数据，含描述与关键字，解析卡组码不依赖网络 |
+| DIY 卡编辑器 | 插件页面 `diy_editor` / `kards diy` | 用真实 KARDS 模板出图：卡名/阵营/类型/稀有度/费用/攻防/描述/关键词/卡图，实时预览并保存设计；聊天端 `kards diy` 进入连续出图模式，单独发「退出」/`exit`/`结束` 或 `kards diy exit` 退出；`kards diy last` 继续最近一张、`kards diy new` 强制新建；不写入官方卡表 |
 
 ## 安装
 
@@ -39,7 +40,7 @@ AStrBot/
 重启 AstrBot，日志出现下面两行即加载成功：
 
 ```text
-Plugin bilikards (v1.0.0) by Fma: ...
+Plugin bilikards (v2.0.0) by Fma: ...
 [bilikards] Manual deck Web API routes registered
 ```
 
@@ -51,6 +52,93 @@ Plugin bilikards (v1.0.0) by Fma: ...
 - 中文字体：自动检测系统字体。Windows 使用黑体，macOS 使用 PingFang，
   Linux 使用文泉驿正黑。找不到时回退到 Pillow 默认字体，中文可能显示为方块。
   Linux 如需更好支持可安装 `fonts-wqy-zenhei` 或 `fonts-wqy-microhei`。
+- DIY 卡字体：由视觉模型分析现有卡图后生成，随插件附带，无需系统字体：
+  - `fonts/kards_card_font.ttf`（内部名称 `KARDS Card Font`，中文标题/正文）
+  - `fonts/kards_card_number.ttf`（内部名称 `KARDS Card Number`，费用/攻防数字）
+  - `fonts/font_profile.json` 记录模型、分析结论、推荐字体与生成参数。
+  系统字体仍作为兜底，方便外部工具或临时替换。
+- DIY 真实模板素材：`assets/kards_builder/`（55 个文件，约 2.6 MB），来自非官方粉丝项目
+  `KARDS-Card-Builder`（Babaika328，基于 1939 Games Community Content Policy，非商业个人使用）。
+  含单位/指令/反制模板、国家横幅、稀有度标记与配套字体；`card_template.py` 按需单张加载，
+  用完即释放，字体缓存上限 128 条，避免常驻高内存。素材缺失时自动回退到自绘卡面。
+  卡名字号按上游 `index.html` 校准：单位 `47`（最大宽度 255，自动缩到 6），
+  指令/反制 `40`（最大宽度 410，深色 `#44474d`），中文用自带字体渲染。
+  指令/反制卡名再上移 10 px（最终出图像素口径）；效果描述字号按文字量自适应，
+  短文本最大 `20`、长文本最小 `11`，始终排在卡框内，超出时末行以 `…` 截断。
+   描述绘制使用默认基线，中文标点 `，。：、！？` 留在行底，不再被 `anchor="lt"` 顶到字上方
+   而看起来像单引号。
+
+### DIY 卡聊天用法
+
+```text
+kards diy                              新建一张卡并进入模式（每次修改自动保存）
+名=闪电部队 阵营=德国 类型=坦克 费=3 攻=4 防=2 描述=闪击   ← 模式内直接发，只修改这张卡
+描述=闪击，部署时抽一张牌                                      ← 继续补字段，之前的字段保留
+插画=1，9~1.2                                                   ← 紧凑写法：左移 1px、上移 9px、放大 1.2 倍
+插画x=1 插画y=9 缩放=1.2                                       ← 等价的独立字段写法，二者可混用
+退出 / exit / 结束 / quit / bye         ← 模式内单独发即可退出并保存（#、/ 前缀也识别）
+kards diy exit                         退出模式（同上，卡片保留）
+kards diy last                         继续编辑最近保存的一张
+kards diy new                          强制新建一张（不用上次的）
+kards diy help                         查看用法
+kards diy list                         列出已保存的 DIY 卡
+kards diy show <ID>                    渲染并继续编辑这张已保存的卡
+kards diy load <卡名/ID>               读取本地卡表 JSON 与卡图，存为新 DIY 卡并进入模式
+kards diy save 字段=值 ...             保存并渲染，如 save 名=闪电部队 阵营=德国 费=3
+kards diy 字段=值 ...                  新建一张卡，保存并渲染后进入模式
+kards diy {"name":"测试卡","faction":"USA","cost":2}
+```
+
+模式说明：一次进入只编一张卡，模式内每条普通消息都是**增量修改**（只写本次提到的字段，
+其他字段保留），并立即写回 `diy_cards.json`；保存提示文字与卡图在**同一条消息**里发出；
+附图会作为这张卡的卡图；
+退出时再做一次防御性保存，回执写明「卡片 ID + 卡名 + 是否含卡图 + 继续编辑命令」，
+避免看起来像没保存。重新进入时 `kards diy` 仍新建空白卡，要接着编辑请用
+`kards diy last` 或 `kards diy show <ID>`。
+单独发「退出」「exit」「结束」「quit」「bye」「退出diy」也能退出（`kards diy` 前缀不需要）；
+`kards diy help/list/show/last/new/exit` 等命令不会被当成字段。按会话 + 发送者区分，群聊里多人互不干扰。
+模式本身保存在进程内存中，插件重载后自动清空，已保存的卡不受影响。
+
+读取本地卡表原有卡牌：聊天端用 `kards diy load <卡名/ID>`，网页编辑器点「读取 JSON + 卡图」。
+两者都会把卡表 13 字段（卡名、阵营、类型、稀有度、费用/行动费、攻防、描述、关键词、标签）
+完整转成 DIY 字段，并从本地 `deck_card_thumbs` / `deck_card_cache` 读取卡图转成 data URL；
+不联网、不改官方卡表。载入后存为新的 `DIY-NN`，可继续增量编辑。
+聊天端会先把原始 JSON 完整发出来，再发「JSON + 卡图」同条预览。
+本地卡图是 400×562 的整卡图，插画缩放沿用 `art_scale` / `插画=~z`，比例可按需要调整。
+
+插画存储位置：
+- **DIY 卡**（`kards diy` 建的卡）：附图会以 `data:image/png;base64,...` 或
+  `data:image/jpeg;base64,...` 的 data URL 直接写进
+  `C:\Users\Administrator\Documents\默认项目\data\plugin_data\bilikards\diy_cards.json`
+  的 `art` 字段，不单独落图片文件；渲染时由 `web_api._diy_art()` 解码。
+  同一条消息附图、或模式内只发一张图都会保存；`插画x/插画y/缩放` 只是位置参数，
+  不替代图片本身。
+- **截图导入的卡**（`kards import`，含 `DIY-` 临时 ID）：卡面 JPEG 缩略图写到
+  `C:\Users\Administrator\Documents\默认项目\data\plugin_data\bilikards\deck_card_thumbs\<card_id>.jpg`，
+  卡牌字段写进 `deck_cards.json` / `manual_decks.sqlite3`；这部分属于卡表，不是 `diy_cards.json`。
+
+字段可用中英文：`名/name`、`英文名/name_en`、`阵营/faction`、`类型/card_type`（别名 `炮兵` → `artillery`，未知类型回退步兵而不再误落到反制）、
+`稀有度/rarity`、`费/cost`、`攻/attack`、`防/defense`、`描述/description`、
+`关键词/keywords`、`id`。同一条消息附图、模式内直接发图，或先发命令再发图，都会作为卡图使用。
+插画位置与放缩：位移单位是**最终输出图 500×702 的像素**，正值 `x` 左移、`y` 上移，
+负值反向；`~z` 的 `z` 是缩放倍数，`1` 为默认铺满，>1 放大居中裁切，<1 缩小并用图片平均色补边；
+位移限制 ±200 px，缩放限制 0.2–5.0。三种写法等价，可混用，也可只写其中一部分（未写的保持不变）：
+
+```text
+插画=x，y~z     例：插画=1，9~1.2    左移 1 px、上移 9 px、放大 1.2 倍
+插画=x，y       例：插画=-1，-9      右移 1 px、下移 9 px，缩放不变
+插画=~z         例：插画=~1.5       只把缩放设为 1.5 倍，位移不变
+```
+
+紧凑写法别名：`插画`、`插画位置`、`位移`、`位置`、`art_pos`、`artpos`、`artxy`、`artoffset`。
+独立字段写法：`插画x`（别名 `左移`、`x`）、`插画y`（别名 `上移`、`y`）、
+`插画缩放`（别名 `缩放`、`放缩`、`zoom`），例如 `插画x=1 插画y=9 缩放=1.2`。
+三个字段与卡图一起增量保存，后续修改不会覆盖。逗号支持半角 `,` 与全角 `，`；若格式不合法会提示
+`插画格式应为 插画=x，y 或 插画=~z 或 插画=x，y~z`，且不会写入错误值。
+分隔符兼容 `=`、`＝`（全角）、`:`、`：`（中文冒号），两边可有空格，例如
+`名 ＝ 闪电部队　阵营：德国　费: 3`。值可加引号以包含空格，不加引号时也会
+读到下一个字段或行尾：`描述=闪击 部署时抽一张牌 阵营=德国`。
+保存的设计在 `data/plugin_data/bilikards/diy_cards.json`，与官方卡表隔离。
 
 - 卡图下载：采用三层fallback策略
   1. 优先尝试官网直连 (www.kards.com)
@@ -342,7 +430,12 @@ astrbot_plugin_bili_kards/                 只读代码与随包种子资源
 ├── deck_cards.json        随包种子卡表；首次运行复制到数据目录，之后只读
 ├── deck_image.py          卡图墙 + 信息图渲染，卡图下载与本地缓存
 ├── manual_deck.py         手动卡组读写、阵营推断、别名库、卡表查询与导入、合成导入码
-├── web_api.py             手动卡组 Web API 路由（卡组、别名、卡牌导入）
+├── web_api.py             手动卡组 Web API 路由（卡组、别名、卡牌导入、DIY 卡渲染/保存/列表）
+├── diy_card.py            DIY 卡面渲染入口（优先模板，缺失时回退自绘，500×702）
+├── card_template.py       真实 KARDS 模板渲染器（按需加载素材、字体缓存限 128 条）
+├── assets/kards_builder/  粉丝项目模板素材（Templates + Fonts，约 2.6 MB，非商业使用）
+├── fonts/                 模型生成的自带 TTF 字体与 font_profile.json
+├── views/diy_editor/      DIY 卡编辑器插件页面
 ├── views/manual_deck/     手动卡组插件页面
 ├── dynamic_fetch.py       动态时间线抓取、wbi 签名、字段解析
 ├── bili_fetch.py          B 站通用只读接口（搜索、视频、用户等）
@@ -356,6 +449,7 @@ AstrBot/data/plugin_data/bilikards/       全部运行时持久化数据
 ├── manual_decks.sqlite3   手动卡组（按用户隔离）
 ├── manual_deck.json       旧卡组文件，仅作初始迁移
 ├── card_aliases.json      卡牌别名库
+├── diy_cards.json         DIY 编辑器保存的自绘卡设计（与官方卡表隔离）
 ├── pending_imports.json   私聊“先指令后图片”待导入状态
 ├── new_cards.json         可选的待导入官方卡牌文件
 ├── deck_card_thumbs/      内置/导入卡图缩略图（1662 张）

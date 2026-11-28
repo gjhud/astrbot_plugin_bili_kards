@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>KARDS DIY 卡编辑器</title>
+  <script src="/api/plugin/page/bridge-sdk.js"></script>
+  <style>
+    :root { --bg:#f4f6f9; --panel:#fff; --text:#1c2430; --muted:#68727f;
+            --line:#d8dee7; --accent:#c9962b; --accent-soft:#f6edd8; }
+    body { margin:0; background:var(--bg); color:var(--text); font:14px/1.5 "Microsoft YaHei",sans-serif; }
+    .wrap { display:flex; gap:24px; padding:24px; max-width:1100px; margin:auto; }
+    .panel { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:20px; }
+    .form { flex:1; display:grid; grid-template-columns:92px 1fr; gap:10px 12px; align-items:center; }
+    .form h2 { grid-column:1/-1; margin:0 0 8px; color:var(--accent); }
+    label { color:var(--muted); }
+    input,select,textarea { width:100%; box-sizing:border-box; background:#fff; color:var(--text);
+      border:1px solid var(--line); border-radius:6px; padding:7px 9px; }
+    textarea { height:84px; resize:vertical; }
+    .actions { grid-column:1/-1; display:flex; gap:10px; margin-top:8px; }
+    button { background:var(--accent); color:#fff; border:0; border-radius:6px;
+      padding:8px 18px; cursor:pointer; font-weight:bold; }
+    button.ghost { background:var(--accent-soft); color:var(--accent); }
+    .preview { width:500px; text-align:center; }
+    .preview img { width:400px; border-radius:8px; border:1px solid var(--line); background:#000; }
+    #msg { color:var(--accent); min-height:20px; margin-top:8px; }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <div class="panel form">
+    <h2>DIY 卡牌编辑器</h2>
+    <label>载入本地卡</label>
+    <div style="display:flex;gap:8px">
+      <input id="load-query" placeholder="本地卡表的卡名或 ID，例：1005th_rifles">
+      <button id="do-load" class="ghost" style="white-space:nowrap">读取 JSON + 卡图</button>
+    </div>
+    <label>ID</label><input id="id" placeholder="留空则保存时自动分配 DIY-NN">
+    <label>中文名</label><input id="name" value="测试卡">
+    <label>英文名</label><input id="name_en" value="TEST CARD">
+    <label>阵营</label><select id="faction">
+      <option value="Germany">德国</option><option value="Britain">英国</option>
+      <option value="Japan">日本</option><option value="Soviet">苏联</option>
+      <option value="USA">美国</option><option value="France" selected>法国</option>
+      <option value="Italy">意大利</option><option value="Poland">波兰</option>
+      <option value="Finland">芬兰</option><option value="Anzac">澳新军团</option>
+      <option value="Neutral">中立</option>
+    </select>
+    <label>类型</label><select id="card_type">
+      <option value="infantry" selected>步兵</option><option value="tank">坦克</option>
+      <option value="artillery">火炮</option><option value="fighter">战斗机</option>
+      <option value="bomber">轰炸机</option><option value="order">指令</option>
+      <option value="countermeasure">反制</option>
+    </select>
+    <label>稀有度</label><select id="rarity">
+      <option value="Standard">普通</option><option value="Limited">限定</option>
+      <option value="Special" selected>特殊</option><option value="Elite">精英</option>
+      <option value="Token">衍生牌</option>
+    </select>
+    <label>费用</label><input id="cost" type="number" value="3">
+    <label>攻击</label><input id="attack" type="number" value="2">
+    <label>防御</label><input id="defense" type="number" value="4">
+    <label>描述</label><textarea id="description">部署：每有 1 个友方动员单位，获得一次 +2 攻击力。</textarea>
+    <label>关键词</label><input id="keywords" placeholder="闪击, 守护">
+    <label>插画左移 px（负为右移）</label><input id="art_x" type="number" step="1" value="0">
+    <label>插画上移 px（负为下移）</label><input id="art_y" type="number" step="1" value="0">
+    <label>插画缩放（1 默认，&gt;1 放大）</label><input id="art_scale" type="number" step="0.05" min="0.2" max="5" value="1">
+    <label>卡图</label><input id="art" type="file" accept="image/*">
+    <label>本地卡 JSON</label><textarea id="card-json" readonly placeholder="点「读取 JSON + 卡图」后显示"></textarea>
+    <div class="actions">
+      <button id="do-render">渲染预览</button>
+      <button id="do-save" class="ghost">保存设计</button>
+      <button id="do-list" class="ghost">已保存列表</button>
+    </div>
+  </div>
+  <div class="panel preview">
+    <img id="preview" alt="预览区">
+    <div id="msg"></div>
+  </div>
+</div>
+<script>
+const $ = (id) => document.getElementById(id);
+const api = window.AstrBotPluginView;
+let artData = "";
+
+if (!api) {
+  $("msg").textContent = "插件页面通道不可用，请在 AstrBot 面板内打开";
+}
+
+$("art").addEventListener("change", async () => {
+  const file = $("art").files[0];
+  if (!file) return;
+  artData = await new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.readAsDataURL(file);
+  });
+  $("msg").textContent = "卡图已载入，点击渲染预览";
+});
+
+function spec() {
+  const num = (id) => { const v = $(id).value.trim(); return v === "" ? null : Number(v); };
+  return {
+    id: $("id").value.trim(), name: $("name").value.trim(), name_en: $("name_en").value.trim(),
+    faction: $("faction").value, card_type: $("card_type").value, rarity: $("rarity").value,
+    cost: num("cost"), attack: num("attack"), defense: num("defense"),
+    description: $("description").value.trim(),
+    keywords: $("keywords").value.split(/[,，]/).map(s => s.trim()).filter(Boolean),
+    art_x: num("art_x") || 0, art_y: num("art_y") || 0,
+    art_scale: num("art_scale") || 1,
+  };
+}
+
+async function renderPreview() {
+  $("msg").textContent = "渲染中…";
+  const r = await api.apiPost("manual/diy/render", { spec: spec(), art: artData });
+  if (!r || !r.ok) { $("msg").textContent = "失败：" + ((r && r.message) || "无返回"); return false; }
+  $("preview").src = r.image;
+  $("msg").textContent = "预览 500×702";
+  return true;
+}
+
+$("do-render").addEventListener("click", renderPreview);
+
+$("do-load").addEventListener("click", async () => {
+  const q = $("load-query").value.trim();
+  if (!q) { $("msg").textContent = "请填写本地卡名或 ID"; return; }
+  $("msg").textContent = "读取本地卡…";
+  const r = await api.apiPost("manual/diy/load", { query: q });
+  if (!r || !r.ok) { $("msg").textContent = "失败：" + ((r && r.message) || "无返回"); return; }
+  const s = r.spec || {};
+  $("id").value = "";
+  $("name").value = s.name || "";
+  $("name_en").value = s.name_en || "";
+  $("faction").value = s.faction || "Neutral";
+  $("card_type").value = s.card_type || "infantry";
+  $("rarity").value = s.rarity || "Standard";
+  $("cost").value = s.cost == null ? "" : s.cost;
+  $("attack").value = s.attack == null ? "" : s.attack;
+  $("defense").value = s.defense == null ? "" : s.defense;
+  $("description").value = s.description || "";
+  $("keywords").value = (s.keywords || []).join(", ");
+  $("card-json").value = JSON.stringify(r.json || {}, null, 2);
+  artData = r.art || "";
+  const note = r.has_art ? "已读取本地卡图" : "本地卡图不存在，可手动上传";
+  $("msg").textContent = "已载入 " + r.name + "（" + r.import_id + "）｜" + note;
+  await renderPreview();
+});
+
+$("do-save").addEventListener("click", async () => {
+  const r = await api.apiPost("manual/diy/save", { spec: spec(), art: artData });
+  $("msg").textContent = r && r.ok ? "已保存 " + r.id : "保存失败";
+});
+
+$("do-list").addEventListener("click", async () => {
+  const r = await api.apiGet("manual/diy/list");
+  const cards = (r && r.cards) || [];
+  $("msg").textContent = "已保存：" + cards.map(c => c.id).join(", ");
+});
+</script>
+</body>
+</html>

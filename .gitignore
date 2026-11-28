@@ -5,3 +5,6 @@ picture/
 root/
 deck_cards.json.bak.*
 *.sqlite3
+# 真实 KARDS 模板与衍生字体因授权原因不入库，本地可自行放置后回退生效
+assets/
+fonts/

@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 import re
 import secrets
@@ -16,7 +17,7 @@ from astrbot.core.message.components import Image, Plain
 from astrbot.core.star.filter.command import GreedyStr
 
 from . import bili_fetch as bf
-from . import data_paths, deck_code, deck_image, manual_deck, web_api
+from . import data_paths, deck_code, deck_image, diy_card, manual_deck, web_api
 from . import dynamic_fetch as df
 from . import dynamic_render as dr
 from .media_cache import ImageCache
@@ -73,6 +74,65 @@ _pending_import: dict[str, tuple[str, float, str]] = _load_pending_imports()
 _search_pages: dict[str, SearchPage] = {}
 # sender_id -> import id of the most recently imported/recognized card.
 _last_import: dict[str, str] = {}
+# session+sender -> DIY mode.  A mode stays active until `kards diy exit`.
+_diy_mode: dict[str, dict] = {}
+DIY_MODE_EXIT_ALIASES = {"exit", "quit", "退出", "退出diy", "结束", "bye", "bye diy"}
+DIY_MODE_TIP = "已进入 DIY 模式，后续每条消息都修改并保存这张卡；单独发「退出」或 kards diy exit 退出"
+# A wake prefix (`#`, `/`, `??`) may precede the command; anything else is art text.
+_DIY_COMMAND_RE = re.compile(r"^\s*(?:[#/??]\s*)?kards\b", re.IGNORECASE)
+
+
+def _diy_mode_key(event) -> str:
+    """Key DIY mode by both session and sender so group users stay isolated."""
+    try:
+        session = str(event.get_session_id() or "")
+    except Exception:
+        session = ""
+    try:
+        sender = str(event.get_sender_id() or "")
+    except Exception:
+        sender = ""
+    return f"{session}::{sender}" if session else sender
+
+
+def _diy_next_id(designs: list) -> str:
+    """Return the next unused DIY id, even if earlier cards were deleted."""
+    used = {str(card.get("id", "")).strip().upper() for card in designs}
+    index = 1
+    while True:
+        candidate = f"DIY-{index:02d}"
+        if candidate not in used:
+            return candidate
+        index += 1
+
+
+def _diy_save_card(entry: dict) -> None:
+    """Upsert one DIY design into diy_cards.json, preserving the other cards."""
+    designs = web_api._load_diy_cards()
+    card_id = str(entry.get("id") or _diy_next_id(designs))
+    saved = {k: v for k, v in entry.items() if k not in ("id", "art")}
+    saved["id"] = card_id
+    art = str(entry.get("art") or "")
+    if art:
+        saved["art"] = art
+    designs = [
+        card for card in designs
+        if str(card.get("id", "")).strip().lower() != card_id.strip().lower()
+    ]
+    designs.append(saved)
+    web_api.DIY_CARDS_FILE.write_text(
+        json.dumps(designs, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
+def _diy_enter_mode(event, card_id: str, spec: dict | None = None, art: str = "") -> None:
+    """Bind one saved card to this sender/session for iterative editing."""
+    _diy_mode[_diy_mode_key(event)] = {
+        "id": str(card_id),
+        "spec": dict(spec or {}),
+        "art": str(art or ""),
+        "started_at": time.time(),
+    }
 
 
 def _known_card_ids() -> set[str]:
@@ -194,6 +254,7 @@ MANUAL_DECK_CLEAR_ALIASES = {"clear", "清空", "清空卡组"}
 MANUAL_DECK_SHOW_ALIASES = {"show", "render", "卡组图", "生成卡组图"}
 MANUAL_DECK_MAIN_ALIASES = {"setmain", "主国", "设置主国"}
 MANUAL_DECK_ALLY_ALIASES = {"setally", "盟国", "设置盟国"}
+MANUAL_DIY_ALIASES = {"diy", "diycard", "diykards", "自制卡", "diy卡"}
 # Field definitions live in manual_deck so the chat command and web page share
 # the same validation.
 FIX_FIELDS = manual_deck.FIX_FIELDS
@@ -223,9 +284,188 @@ HELP_TEXT = (
     "kards list / kards show              查看手动卡组文字 / 图片\n"
     "kards clear                          清空手动卡组\n"
     "kards setmain 国家 / setally 国家    设置手动卡组主国 / 盟国\n"
+    "kards diy                           新建一张卡并进入 DIY 模式（每次修改自动保存）\n"
+    "kards diy new                        强制新建一张卡（不用上次的）\n"
+    "kards diy last                       继续编辑最近保存的 DIY 卡\n"
+    "kards diy 字段=值 ...                新建一张卡，保存并渲染，随后进入模式\n"
+    "kards diy save 字段=值 ...           保存并渲染 DIY 卡\n"
+    "kards diy show <ID>                  渲染并继续编辑已保存的 DIY 卡\n"
+    "kards diy load <卡名/ID>             读取本地卡表 JSON 与卡图，作为新 DIY 卡继续编辑\n"
+    "kards diy exit                       退出 DIY 模式；模式内也可单独发「退出」「exit」「结束」\n"
     "kards 刷新动态                       跳过缓存，重新拉取官方动态\n"
     "卡牌筛选与字段编辑也可在插件页面「手动卡组」操作"
 )
+
+DIY_HELP_TEXT = (
+    "KARDS DIY 卡编辑器（一次进模式只编一张卡，每次修改自动保存）\n"
+    "kards diy                              新建一张卡并进入模式\n"
+    "kards diy new                          强制新建一张卡\n"
+    "kards diy last                         继续编辑最近保存的卡\n"
+    "kards diy exit                         退出模式（卡片已保存）\n"
+    "模式内单独发 退出 / exit / 结束 / quit / bye 也能退出并保存\n"
+    "kards diy help                         查看本帮助\n"
+    "kards diy list                         列出已保存的 DIY 卡\n"
+    "kards diy show <ID>                    渲染并继续编辑这张已保存的卡\n"
+    "kards diy load <卡名/ID>               读取本地卡表 JSON 与卡图，存为新 DIY 卡并进入模式\n"
+    "kards diy save 字段=值 ...             保存并渲染\n"
+    "kards diy 字段=值 ...                  新建一张卡，保存并渲染后进入模式\n"
+    "可带卡图：同一条消息附图，或先发命令再发图\n"
+    "字段：名/卡名、英文名、阵营、类型、稀有度、费、攻、防、描述、关键词、id\n"
+    "插画：插画=x，y~z（左移 x、上移 y、缩放 z，负数反向）\n"
+    "  也可只写 插画=x，y 或 插画=~z；独立字段：插画x/左移、插画y/上移、缩放/放缩\n"
+    "例：kards diy 名=闪电部队 阵营=德国 类型=坦克 稀有度=精英 费=3 攻=4 防=2 描述=闪击，部署时抽一张牌\n"
+    "也可用 JSON：kards diy {\"name\":\"测试卡\",\"faction\":\"USA\",\"cost\":2}\n"
+    "完整编辑请在插件页面打开「diy_editor」"
+)
+
+DIY_FIELD_ALIASES = {
+    "name": "name", "名": "name", "卡名": "name", "名称": "name", "名称中文": "name",
+    "name_en": "name_en", "英文名": "name_en", "英文": "name_en",
+    "faction": "faction", "阵营": "faction", "国家": "faction",
+    "card_type": "card_type", "type": "card_type", "类型": "card_type", "卡类": "card_type",
+    "rarity": "rarity", "稀有度": "rarity",
+    "cost": "cost", "费": "cost", "费用": "cost",
+    "attack": "attack", "攻": "attack", "攻击": "attack",
+    "defense": "defense", "防": "defense", "防御": "defense",
+    "description": "description", "描述": "description", "效果": "description", "文本": "description",
+    "keywords": "keywords", "关键词": "keywords", "词条": "keywords",
+    "id": "id", "编号": "id",
+    # Art placement: positive x = left, positive y = up; negatives reverse.
+    "art_x": "art_x", "插画x": "art_x", "x": "art_x", "左移": "art_x",
+    "art_y": "art_y", "插画y": "art_y", "y": "art_y", "上移": "art_y",
+    "art_scale": "art_scale", "缩放": "art_scale", "放缩": "art_scale",
+    "插画缩放": "art_scale", "zoom": "art_scale",
+    # Compact form: 插画=x，y~z / 插画=x，y / 插画=~z
+    "art_pos": "art_pos", "artpos": "art_pos", "artxy": "art_pos",
+    "artoffset": "art_pos", "插画": "art_pos", "插画位置": "art_pos",
+    "位移": "art_pos", "位置": "art_pos",
+}
+
+
+# Compact art placement: "x，y", "~z" or "x，y~z".  Coordinates may be
+# negative; the tilde part is the zoom multiplier (z).
+_ART_COMPACT_RE = re.compile(
+    r"^\s*(?:([+-]?\d+(?:\.\d+)?)\s*[,，\s]+\s*([+-]?\d+(?:\.\d+)?))?"
+    r"(?:\s*~\s*([+-]?\d+(?:\.\d+)?))?\s*$"
+)
+
+
+def _diy_parse_art_pos(value):
+    """Expand the compact art placement form into the three numeric fields."""
+    text = str(value or "").strip()
+    match = _ART_COMPACT_RE.match(text)
+    if not match or not any(match.groups()):
+        return {}, "插画格式应为 插画=x，y 或 插画=~z 或 插画=x，y~z"
+    x, y, z = match.groups()
+    if (x is None) != (y is None):
+        return {}, "插画坐标必须成对写 x，y"
+    result: dict = {}
+    if x is not None and y is not None:
+        result["art_x"] = float(x)
+        result["art_y"] = float(y)
+    if z is not None:
+        result["art_scale"] = float(z)
+    return result, ""
+
+
+# Common synonyms that are not in deck_code.TYPE_CN.  Without these an
+# unknown value falls through to the countermeasure template by accident.
+_TYPE_VALUE_ALIASES = {
+    "炮兵": "artillery", "炮": "artillery", "火炮": "artillery",
+    "火箭炮": "artillery", "自行火炮": "artillery",
+    "反坦克炮": "artillery", "榴弹炮": "artillery",
+    "歼击机": "fighter", "战斗机": "fighter", "战机": "fighter",
+    "轰炸": "bomber", "反制牌": "countermeasure", "指令牌": "order",
+}
+
+
+def _diy_enum_value(value, cn_map, aliases=None):
+    """Return the canonical English key for a Chinese label or English key."""
+    text = str(value or "").strip()
+    if text in cn_map:
+        return text
+    for key, cn in cn_map.items():
+        if text == cn:
+            return key
+    if aliases and text in aliases:
+        return aliases[text]
+    return text
+
+
+def _diy_parse_fields(text):
+    """Parse ``kards diy`` arguments into a render spec.
+
+    Supports JSON objects and ``字段=值`` pairs.  Separators are tolerant:
+    ``=``, fullwidth ``＝``, ASCII ``:`` and Chinese ``：`` all work, with
+    optional spaces around them.  Quoted values may contain spaces; unquoted
+    values run until the next recognised field or end of input.
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return {}, ""
+    if raw.startswith("{"):
+        try:
+            spec = json.loads(raw)
+        except ValueError as exc:
+            return {}, "DIY JSON 解析失败：" + str(exc)
+        if not isinstance(spec, dict):
+            return {}, "DIY JSON 必须是对象"
+        return dict(spec), ""
+
+    aliases = sorted(DIY_FIELD_ALIASES, key=len, reverse=True)
+    alias_re = "|".join(re.escape(item) for item in aliases)
+    pair_re = re.compile(
+        r"(?P<key>[^\s=＝:：]+)\s*[=＝:：]\s*"
+        r"(?P<value>\"[^\"]*\"|'[^']*'|.*?(?=\s+(?:"
+        + alias_re
+        + r")\s*[=＝:：]|$))",
+        re.IGNORECASE,
+    )
+    pairs = [(m.group("key"), m.group("value")) for m in pair_re.finditer(raw)]
+    if not pairs:
+        return {}, "没识别到字段，发送 kards diy 查看用法"
+    spec: dict = {}
+    for raw_key, raw_value in pairs:
+        key = DIY_FIELD_ALIASES.get(str(raw_key).lower(), str(raw_key).lower())
+        value = raw_value.strip().strip('"').strip("'")
+        if key == "art_pos":
+            expanded, pos_error = _diy_parse_art_pos(value)
+            if pos_error:
+                return {}, pos_error
+            spec.update(expanded)
+            continue
+        if key == "faction":
+            value = _diy_enum_value(value, deck_code.FACTION_CN)
+        elif key == "card_type":
+            value = _diy_enum_value(value, deck_code.TYPE_CN, _TYPE_VALUE_ALIASES)
+        elif key == "rarity":
+            value = _diy_enum_value(value, deck_code.RARITY_CN)
+        elif key in ("cost", "attack", "defense"):
+            try:
+                value = int(value)
+            except ValueError:
+                pass
+        elif key in ("art_x", "art_y", "art_scale"):
+            try:
+                value = float(value)
+            except ValueError:
+                pass
+        elif key == "keywords":
+            value = [item for item in re.split(r"[,，、\s]+", value) if item]
+        spec[key] = value
+    return spec, ""
+
+
+def _diy_art_image(art):
+    """Decode a data URL or raw base64 string into a PIL image."""
+    text = str(art or "").strip()
+    if not text:
+        return None
+    try:
+        raw = text.split(",", 1)[1] if text.startswith("data:") else text
+        return diy_card.art_from_bytes(base64.b64decode(raw))
+    except Exception:
+        return None
 
 
 def fmt_num(n):
@@ -297,7 +537,7 @@ def _dynamic_text(index, item):
     "bilikards",
     "Fma",
     "KARDS B站动态、视频查询与卡组代码图片解析",
-    "v1.0.0",
+    "v2.0.0",
 )
 class BiliKards(Star):
     def __init__(self, context, config=None):
@@ -1194,6 +1434,211 @@ class BiliKards(Star):
         chinese = deck_code.FACTION_CN.get(english, english)
         yield event.plain_result(f"已设置{label}：{chinese}")
 
+    async def _diy_render(self, event: AstrMessageEvent, spec: dict, art="", caption=""):
+        """Render and send a DIY card image, optionally with a text caption."""
+        try:
+            art_img = _diy_art_image(art)
+            png = await asyncio.to_thread(diy_card.render_card_png, spec, art_img)
+            cache = data_paths.IMAGE_CACHE_DIR
+            cache.mkdir(parents=True, exist_ok=True)
+            out = cache / f"diy_{secrets.token_hex(8)}.png"
+            out.write_bytes(png)
+            parts = []
+            if caption:
+                parts.append(Plain(caption))
+            parts.append(Image.fromFileSystem(str(out)))
+            yield event.chain_result(parts)
+        except Exception as exc:
+            self.logger.warning("DIY card render failed: %s", exc)
+            text = "DIY 卡渲染失败，请检查字段是否正确"
+            if caption:
+                text = caption + "\n" + text
+            yield event.plain_result(text)
+
+    async def _diy_art_from_event(self, event: AstrMessageEvent) -> str:
+        """Return the first attached image as a data URL, if any."""
+        try:
+            images = [item for item in event.get_messages() if isinstance(item, Image)]
+        except Exception:
+            images = []
+        if not images:
+            return ""
+        try:
+            path = await images[0].convert_to_file_path()
+            raw = Path(path).read_bytes()
+            suffix = Path(path).suffix.lower()
+            mime = "image/png" if suffix == ".png" else "image/jpeg"
+            return f"data:{mime};base64," + base64.b64encode(raw).decode("ascii")
+        except Exception as exc:
+            self.logger.warning("DIY attached art decode failed: %s", exc)
+            return ""
+
+    async def _diy_exit(self, event: AstrMessageEvent):
+        """Leave DIY mode after a final defensive save of the bound card."""
+        key = _diy_mode_key(event)
+        state = _diy_mode.pop(key, None)
+        if not state:
+            yield event.plain_result("当前不在 DIY 模式")
+            return
+        entry = dict(state["spec"])
+        entry["id"] = state["id"]
+        if state.get("art"):
+            entry["art"] = state["art"]
+        _diy_save_card(entry)
+        name = str(
+            state["spec"].get("name")
+            or state["spec"].get("name_zh")
+            or "未命名"
+        )
+        art_note = "（含卡图）" if state.get("art") else ""
+        yield event.plain_result(
+            f"已退出 DIY 模式，卡片 {state['id']}「{name}」已保存{art_note}\n"
+            f"继续编辑：kards diy show {state['id']} 或 kards diy last\n"
+            "新建另一张：kards diy new"
+        )
+
+    async def _manual_diy(self, event: AstrMessageEvent, kw):
+        """Chat entry point for the DIY card editor.
+
+        One mode session edits exactly one saved card.  Every change is
+        written to diy_cards.json immediately so nothing is lost on exit.
+        """
+        text = (kw or "").strip()
+        parts = text.split(None, 1)
+        sub = parts[0].lower() if parts else ""
+        rest = parts[1].strip() if len(parts) > 1 else ""
+
+        if sub in DIY_MODE_EXIT_ALIASES:
+            async for result in self._diy_exit(event):
+                yield result
+            return
+
+        designs = web_api._load_diy_cards()
+        if (not sub and not rest) or sub in {"new", "新建", "create"}:
+            card_id = _diy_next_id(designs)
+            _diy_save_card({"id": card_id})
+            _diy_enter_mode(event, card_id)
+            tail = (
+                f"继续编辑上次的卡：kards diy last\n" if designs else ""
+            )
+            yield event.plain_result(
+                f"已进入 DIY 模式，正在编辑 {card_id}\n"
+                "模式内每条消息只修改这张卡，并自动保存，例如：\n"
+                "名=闪电部队 阵营=德国 类型=坦克 费=3 攻=4 防=2 描述=闪击\n"
+                "直接附图可当卡图；也可用 JSON：{\"name\":\"测试卡\",\"cost\":2}\n"
+                "kards diy help 查看用法 | kards diy list 查看已保存\n"
+                + tail
+                + "单独发「退出」「exit」「结束」或 kards diy exit 退出模式（卡片保留）"
+            )
+            return
+
+        if sub in {"last", "最近", "继续", "resume", "上次"}:
+            if not designs:
+                yield event.plain_result("还没有保存的 DIY 卡，发送 kards diy 新建一张")
+                return
+            hit = designs[-1]
+            card_id = str(hit.get("id") or "")
+            spec = {k: v for k, v in hit.items() if k not in ("id", "art")}
+            art = str(hit.get("art") or "")
+            caption = f"继续编辑：{card_id}\n" + DIY_MODE_TIP
+            async for result in self._diy_render(event, spec, art, caption=caption):
+                yield result
+            _diy_enter_mode(event, card_id, spec, art)
+            return
+
+        if sub in {"help", "帮助", "用法", "?"}:
+            yield event.plain_result(DIY_HELP_TEXT)
+            return
+
+        if sub in {"list", "列表", "ls"}:
+            if not designs:
+                yield event.plain_result("还没有保存的 DIY 卡，发送 kards diy 查看用法")
+                return
+            lines = [f"已保存 {len(designs)} 张 DIY 卡："]
+            for card in designs:
+                name = card.get("name") or "未命名"
+                faction = deck_code.FACTION_CN.get(card.get("faction"), card.get("faction", ""))
+                kind = deck_code.TYPE_CN.get(card.get("card_type"), card.get("card_type", ""))
+                lines.append(f"{card.get('id')} | {name} | {faction} {kind}")
+            lines.append("继续编辑某张：kards diy show <ID>")
+            yield event.plain_result("\n".join(lines))
+            return
+
+        if sub in {"show", "渲染", "查看"} and rest:
+            target = rest.strip().strip('"').strip("'")
+            hit = next(
+                (c for c in designs if str(c.get("id", "")).lower() == target.lower()),
+                None,
+            )
+            if hit is None:
+                yield event.plain_result(f"没找到保存的 DIY 卡：{target}")
+                return
+            card_id = str(hit.get("id") or "")
+            spec = {k: v for k, v in hit.items() if k not in ("id", "art")}
+            art = str(hit.get("art") or "")
+            caption = f"继续编辑：{card_id}\n" + DIY_MODE_TIP
+            async for result in self._diy_render(event, spec, art, caption=caption):
+                yield result
+            _diy_enter_mode(event, card_id, spec, art)
+            return
+
+        if sub in {"load", "读取", "载入", "加载", "读卡", "from"} and rest:
+            target = rest.strip().strip('"').strip("'")
+            loaded = web_api.local_card_design(target)
+            if not loaded.get("found"):
+                yield event.plain_result(str(loaded.get("error") or "未找到卡牌"))
+                return
+            source_spec = dict(loaded["spec"])
+            card_id = _diy_next_id(designs)
+            spec = dict(source_spec)
+            spec["id"] = card_id
+            art = str(loaded.get("art") or "")
+            entry = dict(spec)
+            if art:
+                entry["art"] = art
+            _diy_save_card(entry)
+            art_note = (
+                f"已附带本地卡图：{loaded['card_id']}"
+                if art else "本地卡图不存在，可发一张图片作为插画"
+            )
+            yield event.plain_result(
+                "本地卡表 JSON：\n"
+                + json.dumps(loaded["json"], ensure_ascii=False, indent=2)
+            )
+            caption = (
+                f"已从本地卡表载入「{loaded['name']}」（{loaded['import_id']}）"
+                f"→ {card_id}\n{art_note}\n" + DIY_MODE_TIP
+            )
+            async for result in self._diy_render(event, spec, art, caption=caption):
+                yield result
+            _diy_enter_mode(event, card_id, spec, art)
+            return
+
+        save = sub in {"save", "保存", "存"}
+        payload = rest if save else text
+        spec, error = _diy_parse_fields(payload)
+        if error:
+            yield event.plain_result(error + "\n" + DIY_HELP_TEXT)
+            return
+        if not spec:
+            yield event.plain_result(DIY_HELP_TEXT)
+            return
+        card_id = str(spec.pop("id", "") or "").strip()
+        art = str(spec.pop("art", "") or "")
+        if not art:
+            art = await self._diy_art_from_event(event)
+        card_id = (card_id if save else "") or _diy_next_id(designs)
+        entry = dict(spec)
+        entry["id"] = card_id
+        if art:
+            entry["art"] = art
+        _diy_save_card(entry)
+        save_note = f"已保存 DIY 卡：{card_id}" if save else f"已新建并保存：{card_id}"
+        caption = save_note + "\n" + DIY_MODE_TIP + f" 当前：{card_id}"
+        async for result in self._diy_render(event, spec, art, caption=caption):
+            yield result
+        _diy_enter_mode(event, card_id, spec, art)
+
     async def _deck_reply(self, event: AstrMessageEvent, code):
         """Decode a deck code and yield a caption plus a rendered image."""
         code = (code or "").strip()
@@ -1269,6 +1714,9 @@ class BiliKards(Star):
         """
         sender = str(event.get_sender_id())
         session_key = str(event.get_session_id() or "")
+        # In DIY mode every image is card art, never a card-table import.
+        if _diy_mode_key(event) in _diy_mode:
+            return
         text = (event.get_message_str() or "").strip()
         images = [item for item in event.get_messages() if isinstance(item, Image)]
         if not images:
@@ -1345,6 +1793,66 @@ class BiliKards(Star):
     @filter.event_message_type(
         filter.EventMessageType.PRIVATE_MESSAGE | filter.EventMessageType.GROUP_MESSAGE
     )
+    async def diy_mode_message(self, event: AstrMessageEvent):
+        """Apply every message to the single card bound to this DIY session."""
+        key = _diy_mode_key(event)
+        state = _diy_mode.get(key)
+        if not state:
+            return
+        raw = str(getattr(getattr(event, "message_obj", None), "message_str", "") or "")
+        text = (raw or str(event.get_message_str() or "")).strip()
+        # Wake prefixes may or may not be stripped upstream; accept both forms.
+        while True:
+            stripped = False
+            for prefix in ("#", "／", "/", "?"):
+                if text.startswith(prefix):
+                    text = text[len(prefix) :].strip()
+                    stripped = True
+            if not stripped:
+                break
+        # Commands are handled by the `kards` handler, not as card fields.
+        if _DIY_COMMAND_RE.match(text):
+            return
+        # Standalone exit words leave the mode without a `kards diy` prefix.
+        if text.replace(" ", "").replace("\u3000", "").lower() in DIY_MODE_EXIT_ALIASES:
+            async for result in self._diy_exit(event):
+                yield result
+            return
+        attached_art = await self._diy_art_from_event(event)
+        if not text and not attached_art:
+            return
+        if text:
+            delta, error = _diy_parse_fields(text)
+            if error:
+                yield event.plain_result(error + "\n" + DIY_HELP_TEXT)
+                return
+            if not delta and not attached_art:
+                yield event.plain_result(DIY_HELP_TEXT)
+                return
+        else:
+            delta = {}
+        # The card id is fixed for the whole session; later messages only edit it.
+        delta.pop("id", None)
+        field_art = str(delta.pop("art", "") or "")
+        if attached_art:
+            state["art"] = attached_art
+        elif field_art:
+            state["art"] = field_art
+        state["spec"].update(delta)
+        entry = dict(state["spec"])
+        entry["id"] = state["id"]
+        if state["art"]:
+            entry["art"] = state["art"]
+        _diy_save_card(entry)
+        caption = f"已保存并更新：{state['id']}"
+        async for result in self._diy_render(
+            event, dict(state["spec"]), state["art"], caption=caption
+        ):
+            yield result
+
+    @filter.event_message_type(
+        filter.EventMessageType.PRIVATE_MESSAGE | filter.EventMessageType.GROUP_MESSAGE
+    )
     @filter.command("kards")
     async def kards(self, event: AstrMessageEvent, args: GreedyStr):
         parts = (args or "").strip().split(None, 1)
@@ -1365,6 +1873,7 @@ class BiliKards(Star):
             | MANUAL_DECK_SHOW_ALIASES
             | MANUAL_DECK_MAIN_ALIASES
             | MANUAL_DECK_ALLY_ALIASES
+            | MANUAL_DIY_ALIASES
         )
         if sub not in cheap_manual:
             uid = event.get_sender_id()
@@ -1431,6 +1940,11 @@ class BiliKards(Star):
 
         if sub in MANUAL_DECK_ALLY_ALIASES:
             async for result in self._manual_set_faction(event, kw, ally=True):
+                yield result
+            return
+
+        if sub in MANUAL_DIY_ALIASES:
+            async for result in self._manual_diy(event, kw):
                 yield result
             return
 
@@ -1691,6 +2205,16 @@ class BiliKards(Star):
             alias(string): 要添加的别名。
         """
         async for result in self._manual_alias(event, f"{card} ～ {alias}"):
+            yield result
+
+    @llm_tool(name="kards_diy")
+    async def tool_diy(self, event: AstrMessageEvent, spec: str):
+        """渲染 DIY KARDS 卡面；支持字段=值、JSON、list、show、save。
+
+        Args:
+            spec(string): 如“名=测试卡 阵营=美国 费=3”；list 列出已保存；show <ID> 渲染；save 字段=值 保存并渲染。
+        """
+        async for result in self._manual_diy(event, spec):
             yield result
 
     @llm_tool(name="kards_alias_list")

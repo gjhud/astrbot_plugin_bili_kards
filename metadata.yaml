@@ -4,7 +4,7 @@ short_desc: KARDS 动态、卡组解析、手动组卡与新卡识别
 desc: |
   KARDS 插件：查询官方 B 站动态和相关视频，解析卡组导入码并生成卡组图片。
   支持网页手动卡组、卡牌搜索与别名库、卡图识别导入新卡、衍生牌拦截和按用户隔离卡组。
-version: 1.0.0
+version: 2.0.0
 author: "Fma"
 repo: https://github.com/gjhud/astrbot_plugin_bili_kards
 astrbot_version: ">=4.25.0"

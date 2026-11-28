@@ -16,7 +16,7 @@ from PIL import Image
 from astrbot.api import logger
 from astrbot.api.web import error_response, file_response, json_response, request
 
-from . import card_crop, data_paths, deck_code, deck_image, manual_deck
+from . import card_crop, data_paths, deck_code, deck_image, diy_card, manual_deck
 
 THUMB_DIR = data_paths.THUMB_DIR
 
@@ -312,16 +312,19 @@ def _clean_card_id(value: object) -> str:
     return text
 
 
-async def card_image_data():
-    """Return one bundled card thumbnail as a data URL for WebUI preview."""
-    card_id = _clean_card_id(str(request.query.get("card_id") or "").strip().lower())
-    if not card_id:
-        return error_response("无效卡图", status_code=400)
-    names = [card_id]
-    if card_id.endswith("_vet"):
-        names.append(card_id[:-4])
+def _local_card_art_url(card_id: object) -> str:
+    """Return a bundled card image as a data URL, or an empty string.
+
+    Search order matches the chat renderer ``deck_image._local_thumb``:
+    thumbnail JPEG first, then the per-card cache in webp/jpg/png.
+    """
+    text = _clean_card_id(str(card_id or "").strip().lower())
+    if not text:
+        return ""
+    names = [text]
+    if text.endswith("_vet"):
+        names.append(text[:-4])
     for name in names:
-        # 与聊天端 _local_thumb 相同的本地查找顺序，覆盖 deck_card_cache 缓存
         candidates = (
             (THUMB_DIR / f"{name}.jpg", "image/jpeg"),
             (data_paths.CARD_CACHE_DIR / f"{name}.webp", "image/webp"),
@@ -331,10 +334,18 @@ async def card_image_data():
         for path, mime in candidates:
             if path.is_file():
                 encoded = base64.b64encode(path.read_bytes()).decode("ascii")
-                return json_response(
-                    {"image": f"data:{mime};base64," + encoded, "card_id": card_id}
-                )
-    return json_response({"image": "", "card_id": card_id})
+                return f"data:{mime};base64," + encoded
+    return ""
+
+
+async def card_image_data():
+    """Return one bundled card thumbnail as a data URL for WebUI preview."""
+    card_id = _clean_card_id(str(request.query.get("card_id") or "").strip().lower())
+    if not card_id:
+        return error_response("无效卡图", status_code=400)
+    return json_response({
+        "image": _local_card_art_url(card_id), "card_id": card_id
+    })
 
 
 def _normalize_image(raw: bytes) -> tuple[bytes, str]:
@@ -981,6 +992,158 @@ async def import_card_image():
     return json_response(summary)
 
 
+DIY_CARDS_FILE = data_paths.DATA_DIR / "diy_cards.json"
+
+
+def _diy_art(value):
+    """Decode an optional data-URL/base64 art image for the DIY renderer."""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    raw = text.split(",", 1)[1] if text.startswith("data:") else text
+    return diy_card.art_from_bytes(base64.b64decode(raw))
+
+
+def _load_diy_cards() -> list:
+    if not DIY_CARDS_FILE.exists():
+        return []
+    try:
+        data = json.loads(DIY_CARDS_FILE.read_text(encoding="utf-8"))
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def local_card_design(query: object) -> dict:
+    """Resolve a local card table entry into DIY fields, JSON and card art.
+
+    The returned ``json`` is the raw 13-field card row in a readable form and
+    deliberately excludes the base64 image payload.  ``art`` is a data URL
+    loaded from the local thumbnail/cache only - no network access.
+    """
+    text = str(query or "").strip()
+    if not text:
+        return {"found": False, "error": "请提供本地卡表的卡牌 ID 或卡名"}
+
+    import_id = ""
+    matches = manual_deck.find_cards(text, limit=1)
+    if matches:
+        import_id = str(matches[0])
+    info = deck_code.CARDS.get(import_id)
+    if info is None:
+        for key, row in deck_code.CARDS.items():
+            if str(row[0] or "").strip().lower() == text.lower():
+                import_id, info = str(key), row
+                break
+    if info is None:
+        return {"found": False, "error": "本地卡表没找到：" + text}
+
+    description, keywords = manual_deck._row_extra(info)
+    tags = manual_deck._row_tags(info)
+    card_id = str(info[0] or "")
+    name = str(info[1] or "")
+    name_en = str(info[2] or "")
+    spec = {
+        "name": name,
+        "name_en": name_en,
+        "faction": str(info[3] or "Neutral"),
+        "card_type": str(info[4] or "infantry"),
+        "rarity": str(info[5] or "Standard"),
+        "cost": info[6],
+        "attack": info[8],
+        "defense": info[9],
+        "description": description,
+        "keywords": list(keywords),
+        "operation_cost": info[7],
+        "source_card_id": card_id,
+        "source_import_id": import_id,
+    }
+    raw = {
+        "import_id": import_id,
+        "card_id": card_id,
+        "name_zh": name,
+        "name_en": name_en,
+        "faction": info[3],
+        "card_type": info[4],
+        "rarity": info[5],
+        "kredits": info[6],
+        "operation_cost": info[7],
+        "attack": info[8],
+        "defense": info[9],
+        "description": description,
+        "keywords": list(keywords),
+        "tags": list(tags),
+    }
+    art = _local_card_art_url(card_id)
+    return {
+        "found": True,
+        "spec": spec,
+        "json": raw,
+        "art": art,
+        "card_id": card_id,
+        "import_id": import_id,
+        "name": name or name_en or import_id,
+        "has_art": bool(art),
+    }
+
+
+async def diy_load():
+    """Load a local card table entry for the DIY editor (JSON + card art)."""
+    body = await request.json({})
+    body = body if isinstance(body, dict) else {}
+    query = body.get("query") or body.get("card_id") or body.get("name") or ""
+    result = local_card_design(query)
+    if not result.get("found"):
+        return error_response(str(result.get("error") or "未找到卡牌"), status_code=404)
+    return json_response({"ok": True, **result})
+
+
+async def diy_render():
+    """Render a DIY card face without touching the official card table."""
+    body = await request.json({})
+    body = body if isinstance(body, dict) else {}
+    spec = body.get("spec") if isinstance(body.get("spec"), dict) else body
+    try:
+        art = _diy_art(body.get("art") or spec.get("art"))
+        png = diy_card.render_card_png(spec, art)
+    except Exception as exc:
+        return error_response(str(exc), status_code=400)
+    return json_response({
+        "ok": True,
+        "image": "data:image/png;base64," + base64.b64encode(png).decode("ascii"),
+        "size": [500, 702],
+    })
+
+
+async def diy_save():
+    """Save a DIY card design to diy_cards.json (not the official card table)."""
+    body = await request.json({})
+    body = body if isinstance(body, dict) else {}
+    spec = body.get("spec") if isinstance(body.get("spec"), dict) else body
+    art = str(body.get("art") or spec.get("art") or "")
+    cards = _load_diy_cards()
+    entry = {k: v for k, v in spec.items() if k != "art"}
+    entry["id"] = str(entry.get("id") or f"DIY-{len(cards) + 1:02d}")
+    if art:
+        entry["art"] = art
+    cards = [c for c in cards if c.get("id") != entry["id"]]
+    cards.append(entry)
+    DIY_CARDS_FILE.write_text(
+        json.dumps(cards, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    return json_response({"ok": True, "id": entry["id"], "count": len(cards)})
+
+
+async def diy_list():
+    """List saved DIY designs without the embedded art payload."""
+    return json_response({
+        "ok": True,
+        "cards": [
+            {k: v for k, v in c.items() if k != "art"} for c in _load_diy_cards()
+        ],
+    })
+
+
 ROUTES = [
     ("manual/catalog", get_catalog, ["GET"], "手动卡组：卡牌目录"),
     ("manual/aliases", get_aliases, ["GET"], "手动卡组：别名库"),
@@ -1008,6 +1171,10 @@ ROUTES = [
     ("manual/render", render_deck, ["POST"], "手动卡组：生成图片"),
     ("manual/thumb", card_thumb, ["GET"], "手动卡组：卡图"),
     ("manual/card-image", card_image_data, ["GET"], "手动卡组：单卡预览图"),
+    ("manual/diy/load", diy_load, ["POST"], "DIY 卡：载入本地卡表卡牌 JSON 与卡图"),
+    ("manual/diy/render", diy_render, ["POST"], "DIY 卡：渲染卡面"),
+    ("manual/diy/save", diy_save, ["POST"], "DIY 卡：保存设计"),
+    ("manual/diy/list", diy_list, ["GET"], "DIY 卡：已保存设计"),
 ]
 
 
