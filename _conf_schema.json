@@ -36,8 +36,8 @@
   },
   "vision_provider_id": {
     "description": "卡图识别使用的视觉模型",
-    "hint": "填写 AstrBot 中支持图片输入的 provider ID，例如 openai_1/Gemma-4-31B-IT；留空自动选择",
+    "hint": "填写 AstrBot 中支持图片输入的 provider ID，例如 openai-responses/Sage-S2.1-Flash；留空自动选择",
     "type": "string",
-    "default": "openai_1/Gemma-4-31B-IT"
+    "default": "openai-responses/Sage-S2.1-Flash"
   }
 }

@@ -45,6 +45,7 @@ DECK_DB = DATA_DIR / "manual_decks.sqlite3"
 ALIAS_FILE = DATA_DIR / "card_aliases.json"
 CARDS_FILE = DATA_DIR / "deck_cards.json"
 PENDING_IMPORT_FILE = DATA_DIR / "pending_imports.json"
+TEMP_IMPORT_FILE = DATA_DIR / "temp_import_ids.json"
 NEW_CARDS_FILE = DATA_DIR / "new_cards.json"
 
 THUMB_DIR = DATA_DIR / "deck_card_thumbs"

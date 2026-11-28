@@ -18,7 +18,7 @@ KARDS 社区向 AstrBot 插件。它把 KARDS 官方 B 站动态、相关视频�
 | 手动卡组 | 插件页面 | 逐张加卡、减卡、设置主国盟国，生成同样的两张图（聊天中不提供组建卡组指令） |
 | 卡牌搜索 | 插件页面 / `kards s` | 按名称、别名、关键字、阵营、类型、稀有度、费用/攻防范围筛选；QQ 返回卡图拼图 |
 | 别名库 | 插件页面 / `kards alias` | 给卡牌起常用别名，聊天和页面搜索都能用 |
-| 卡牌更新 | 插件页面 / `kards import` | 上传卡图自动识别，或导入官方新卡 JSON；QQ 私聊可先发指令再补卡图，自动备份并立即生效 |
+| 卡牌更新 | 插件页面 / `kards import` | 上传卡图自动识别，或导入官方新卡 JSON；不带参数会生成二位临时短码，识别后需“同意”才同步正式卡表 |
 | 本地卡表 | `deck_cards.json` | 1647 张卡的离线数据，含描述与关键字，解析卡组码不依赖网络 |
 
 ## 安装
@@ -48,9 +48,15 @@ Plugin bilikards (v1.0.0) by Fma: ...
 - `aiohttp`：AstrBot 已自带。
 - `Pillow`：卡组图片和动态长图需要。AstrBot 环境通常已安装；缺失时卡组码会
   自动退回文字卡表，动态配图会跳过拼接。
-- 中文字体：默认读取 `/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc`，找不到
-  时使用 Pillow 默认字体，中文可能显示为方块。Debian/Ubuntu 可安装
-  `fonts-wqy-zenhei`。
+- 中文字体：自动检测系统字体。Windows 使用黑体，macOS 使用 PingFang，
+  Linux 使用文泉驿正黑。找不到时回退到 Pillow 默认字体，中文可能显示为方块。
+  Linux 如需更好支持可安装 `fonts-wqy-zenhei` 或 `fonts-wqy-microhei`。
+
+- 卡图下载：采用三层fallback策略
+  1. 优先尝试官网直连 (www.kards.com)
+  2. 失败则使用 wsrv.nl 中转
+  3. 仍失败则使用 weserv.nl 中转
+  4. 最后尝试 kardscm API
 
 ## 命令
 
@@ -136,8 +142,10 @@ kards s 德国 坦克 6K2/5/4 闪击  # 多条件搜索：费用6 行动2 攻5 �
 kards alias 虎式坦克 E 型 ～ 虎E  # 添加别名
 kards alias list               # 查看别名库
 kards alias del 虎E            # 删除别名
-kards import [JSON]            # 导入/更新卡牌数据
-kards import 卡牌ID            # 私聊：先发指令再发卡图，识别并导入
+kards import                   # 生成二位临时短码，发卡图后先出草稿
+kards import <ID/JSON/文件名>  # 按指定 ID 导入，或私聊发卡图识别并导入
+kards confirm / 回复“同意”     # 把草稿同步到正式卡表
+kards cancel                   # 放弃待确认草稿
 kards fix <字段> <新值>        # 修正刚导入卡牌的识别错误（如 kards fix 攻击 6）
 kards fix <卡牌> <字段> <新值> # 修正指定卡牌字段；kards fix <卡牌> 查看当前字段
 kards setid 临时ID/卡名 永久ID  # 将 DIY 临时 ID 设为永久 ID（2 位字母/数字）
@@ -148,14 +156,16 @@ kards clear                    # 清空手动卡组
 kards setmain 德国 / setally 日本  # 设置手动卡组主国 / 盟国
 ```
 
-搜索结果超过 15 张时会自动分页，每张卡图拼图最多 15 张卡，并提示发送 `#` 查看下一页（也可用「下一页」或 `next`）。搜索状态保留 10 分钟。
+搜索结果超过 15 张时会自动分页，每张卡图拼图最多 15 张卡，并提示发送 `#` 查看下一页（也可用「下一页」或 `next`）。搜索状态保留 5 分钟。
+
+搜索结果列表带序号；发送 `#第N个`（群聊可发 `/#第N个` 或 `##第N个`）会单独发送第 N 张卡的卡图和完整 JSON 信息，优先按当前页序号，超出本页时按全部结果序号。搜索结果只有 1 张时不发拼图，直接发送该卡的单独卡图和完整 JSON 信息。
 
 说明：
 
 - 搜索支持名称、别名、描述、词条、标签及属性条件；不同关键词用空格分隔，费用支持 `nK` / `nKm`，攻防支持 `5/4` 或 `攻5 防4` 等写法。卡名匹配忽略空格，`MONSOONRAIN` 与 `MONSOON RAIN`、`第16步兵旅` 与 `第 16 步兵旅` 等价。
 - 手动卡组按用户隔离，保存在 `data/plugin_data/bilikards/manual_decks.sqlite3`：聊天按平台+发送者区分，网页按仪表盘账号区分；同一用户在聊天与网页看到同一份卡组，修改即时生效。衍生牌（Token）不可加入卡组。
 - 卡牌筛选、字段修正和网页组卡也可在 AstrBot 仪表盘插件页面「手动卡组」操作。
-- 导入新卡默认使用 `DIY-<随机>` 临时 ID；可用 `kards setid` 设置永久 ID（2 位字母/数字，兼容卡组码）。
+- 卡图识别不带 ID 时会生成二位 base62 临时短码，识别结果先存草稿；确认后才写入卡表。也可用 `kards setid <短码> <正式ID>` 在确认前改号。
 - 通过卡图识别导入时会尝试使用视觉模型生成标签文本并一并写入。
 - 卡图识别字段有误时，除聊天 `kards fix` 外，也可在网页「手动卡组」卡牌库里点该卡的「修」按钮直接改字段并保存。
 
@@ -177,10 +187,12 @@ kards 别名 虎式坦克 E 型 ～ 虎E
 ### 卡牌更新（聊天）
 
 ```text
-kards import                         # 读取 data/plugin_data/bilikards/new_cards.json
-kards import [{"importId":"Zz",...}] # 直接粘贴 JSON
+kards import                         # 生成二位临时短码，进入“发卡图 → 草稿 → 同意”流程
 kards import new_cards.json          # 读取数据目录或插件目录内的文件
+kards import [{"importId":"Zz",...}] # 直接粘贴 JSON
 ```
+
+- 要导入旧的 `new_cards.json`，请显式写文件名 `kards import new_cards.json`。
 
 - 支持 Fards 的 `cards.json` 数组、`{"cards": [...]}`，以及简化字段的单个对象。
 - 导入前自动备份为 `data/plugin_data/bilikards/deck_cards.json.bak.YYYYmmdd_HHMMSS`。
@@ -207,21 +219,32 @@ kards import new_cards.json          # 读取数据目录或插件目录内的�
 
 ### 卡图识别导入（QQ 私聊）
 
-仅限私聊，避免群聊误触发：
+在同一个会话里发送：
+
+```text
+kards import
+（1 分钟内发送卡图，识别后回复“同意”）
+```
+
+或指定 ID 直接写入：
 
 ```text
 kards import 101_infantry_regiment
-（紧接着发一张卡图）
+（1 分钟内发送卡图）
 ```
 
-1. 先发送 `kards import <卡牌 ID>`（也可用 `kards 导入卡牌 <卡牌 ID>`）。
-2. 机器人在 5 分钟内记录该 ID，并提示你补发卡图。
-3. 紧接着发送卡图，插件会先裁掉卡图外的内容；若有多张卡则逐张识别，第一张用
-   指令里的 ID，其余使用 `DIY-` 临时 ID。识别结果会合并到卡表并回复名称、
-   阵营、类型、稀有度、费用、攻防和关键字。
+1. 不带参数会随机生成二位 base62 短码，识别结果先存草稿；回复“同意”或 `kards confirm` 后才同步到正式卡表，`kards cancel` 放弃。指定 ID 时仍直接写入。
+2. 机器人在当前会话记录该 ID，有效期 **1 分钟**；期间只有发命令的同一个发送者有效。
+3. 这 1 分钟内在该会话发送的卡图都会按该 ID 识别；每次识别会先裁掉卡图外的内容，
+   若一张图里有多张卡则逐张识别，第一张用指令里的 ID，其余使用 `DIY-` 临时 ID。
+   识别结果会回复名称、阵营、类型、稀有度、费用、攻防和关键字；不带参数时进草稿，确认后才写入卡表。
 4. 卡图同样保存为 `data/plugin_data/bilikards/deck_card_thumbs/<卡牌 ID>.jpg`。
 
-如果一条消息里同时带指令和卡图，会直接识别，不需要再等第二条消息。
+如果一条消息里同时带指令和卡图，会直接识别，并继续为该会话保持 1 分钟识别窗口。
+
+没有执行 `kards import <卡牌 ID>` 时，只有图片说明文字或文件名是**卡表里已有的卡牌 ID / 导入 ID**
+才会触发识别（例如 `101_infantry_regiment`、`01`）。随机文件名和机器人生成的拼图名会被忽略。
+全新卡牌 ID 请先用 `kards import <卡牌 ID>` 显式声明。
 
 ### 帮助
 
@@ -284,7 +307,7 @@ http://<AstrBot 地址>:6185/plugin-page/bilikards/manual_deck
 | `send_pics` | bool | `true` | 是否下载并发送动态配图 |
 | `max_pics_per_item` | int | `9` | 每条动态最多发送的图片数，`0` 表示不发图 |
 | `deck_image` | bool | `true` | 卡组码是否生成图片，`false` 时只发文字 |
-| `vision_provider_id` | string | `openai_1/Gemma-4-31B-IT` | 卡图识别使用的视觉模型，留空自动选择；失败时自动回退到其他图片模型 |
+| `vision_provider_id` | string | `openai-responses/Sage-S2.1-Flash` | 卡图识别使用的视觉模型，留空自动选择；失败时自动回退到其他图片模型 |
 
 ## 动态是怎么刷新的
 

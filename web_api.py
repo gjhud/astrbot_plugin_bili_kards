@@ -6,6 +6,7 @@ import asyncio
 import base64
 import io
 import json
+import os
 import re
 import secrets
 from pathlib import Path
@@ -28,14 +29,14 @@ _plugin_config: dict = {}
 
 # Prefer a fast, reliable image model.  Reasoning-heavy models can exceed the
 # provider request timeout and make the whole import look broken.
-DEFAULT_VISION_PROVIDER = "openai_1/Gemma-4-31B-IT"
+DEFAULT_VISION_PROVIDER = "openai-responses/Sage-S2.1-Flash"
 # Tried in order when the configured provider is missing, times out, or does
 # not return usable card data.  Every entry must accept image input.
-VISION_FALLBACK_PROVIDERS = (
-    "openai_1/Gemma-4-31B-IT",
-    "openai_1/MiMo-V2.6-Flash",
-    "openai_2/Agents-A1",
-)
+VISION_FALLBACK_PROVIDERS = ("openai-responses/Sage-S2.1-Flash",)
+# Agents-A1 is declared image-capable but the current gateway rejects its
+# multimodal requests (HTTP 400, invalid message content).  Skip it for card
+# recognition instead of wasting time on a request that cannot succeed.
+VISION_EXCLUDED_PROVIDERS = {"openai-responses/Agents-A1"}
 VISION_TIMEOUT = 75
 VISION_MAX_ATTEMPTS = 3
 MAX_IMAGE_SIDE = 1600
@@ -311,6 +312,31 @@ def _clean_card_id(value: object) -> str:
     return text
 
 
+async def card_image_data():
+    """Return one bundled card thumbnail as a data URL for WebUI preview."""
+    card_id = _clean_card_id(str(request.query.get("card_id") or "").strip().lower())
+    if not card_id:
+        return error_response("无效卡图", status_code=400)
+    names = [card_id]
+    if card_id.endswith("_vet"):
+        names.append(card_id[:-4])
+    for name in names:
+        # 与聊天端 _local_thumb 相同的本地查找顺序，覆盖 deck_card_cache 缓存
+        candidates = (
+            (THUMB_DIR / f"{name}.jpg", "image/jpeg"),
+            (data_paths.CARD_CACHE_DIR / f"{name}.webp", "image/webp"),
+            (data_paths.CARD_CACHE_DIR / f"{name}.jpg", "image/jpeg"),
+            (data_paths.CARD_CACHE_DIR / f"{name}.png", "image/png"),
+        )
+        for path, mime in candidates:
+            if path.is_file():
+                encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+                return json_response(
+                    {"image": f"data:{mime};base64," + encoded, "card_id": card_id}
+                )
+    return json_response({"image": "", "card_id": card_id})
+
+
 def _normalize_image(raw: bytes) -> tuple[bytes, str]:
     """Convert raw image bytes to JPEG and return bytes plus a data URL.
 
@@ -509,7 +535,9 @@ def _vision_prompt() -> str:
         "费用在卡牌左上角，攻击在左下角，防御在右下角，请逐项核对数字，不要猜测。\n"
         "无法确定的字段填 null。description 保留卡面上的中文描述，不要翻译或改写。\n"
         "tags 请根据卡图和卡面效果生成用于搜索的标签文本（中文短词/短语），可包含兵种、定位、效果关键词、"
-        "主题等；没有可补充标签时返回空数组。"
+        "主题等；没有可补充标签时返回空数组。\n"
+        "如果图片不是完整的 KARDS 卡牌正面（例如只有卡面插画、手机截图、"
+        "聊天记录、表情包或动图），只输出 {\"error\":\"not_a_card\"}。"
     )
 
 
@@ -534,7 +562,11 @@ def _vision_candidates(preferred: object = "") -> list[str]:
     Returns:
         Up to :data:`VISION_MAX_ATTEMPTS` provider ids that accept images.
     """
-    known = [item["id"] for item in _vision_providers() if item["id"]]
+    known = [
+        item["id"]
+        for item in _vision_providers()
+        if item["id"] and item["id"] not in VISION_EXCLUDED_PROVIDERS
+    ]
     known_set = set(known)
     ordered: list[str] = []
 
@@ -578,8 +610,17 @@ async def _recognize_with_provider(chosen: str, image_url: str) -> tuple[dict, s
     )
     text = (getattr(response, "completion_text", "") or "").strip()
     fields = _extract_json_object(text)
+    flag = str(fields.get("error") or "").strip().lower()
+    if flag in {"not_a_card", "not_card", "not a card"}:
+        raise CardImportError(
+            "图片不是完整 KARDS 卡牌正面。请发送包含卡名、费用、攻防和描述文本的完整卡图；"
+            "只有插画、手机截图或表情包无法识别。"
+        )
     if not fields.get("name_zh") and not fields.get("name_en"):
-        raise CardImportError("没有识别出卡牌名称，请换一张更清晰的卡图", 422)
+        raise CardImportError(
+            "没有读出卡牌名称。请发送清晰、完整的 KARDS 卡图"
+            "（含卡名、费用、攻防和描述文本框）；只有插画或截图无法导入。"
+        )
     return fields, text
 
 
@@ -588,14 +629,16 @@ async def _recognize_one_card(
     card_id: str,
     provider: object = "",
     existing_id: str = "",
+    commit: bool = True,
 ) -> dict:
-    """Recognize one cropped card image and merge it into the table.
+    """Recognize one cropped card image and optionally merge it into the table.
 
     Args:
         image_bytes: JPEG bytes of one cropped card.
         card_id: Card art id to write.
         provider: Optional vision provider id.
         existing_id: Import id to update instead of adding a new row.
+        commit: Write to the card table now; False only builds a draft entry.
 
     Returns:
         Import summary for that single card.
@@ -699,16 +742,32 @@ async def _recognize_one_card(
                 break
     if existing_id:
         entry["importId"] = existing_id
+    elif not commit and re.fullmatch(r"[0-9A-Za-z]{2}", card_id):
+        # A generated two-character short code is both the art id and the
+        # import id until the user confirms and we sync it to the card table.
+        entry["importId"] = card_id
 
-    try:
-        summary = manual_deck.import_cards([entry])
-    except ValueError as exc:
-        raise CardImportError(str(exc)) from exc
-    except Exception as exc:
-        logger.warning("Card image import failed: %s", exc)
-        raise CardImportError(
-            "写入卡表失败，请查看 AstrBot 日志", status_code=500
-        ) from exc
+    if not commit:
+        draft_name = entry.get("name_zh") or entry.get("name_en") or card_id
+        summary = {
+            "added": 1,
+            "updated": 0,
+            "unchanged": 0,
+            "total": 1,
+            "cards": [{"id": entry.get("importId", card_id), "name": draft_name, "action": "added"}],
+            "backup": "",
+            "draft_entry": entry,
+        }
+    else:
+        try:
+            summary = manual_deck.import_cards([entry])
+        except ValueError as exc:
+            raise CardImportError(str(exc)) from exc
+        except Exception as exc:
+            logger.warning("Card image import failed: %s", exc)
+            raise CardImportError(
+                "写入卡表失败，请查看 AstrBot 日志", status_code=500
+            ) from exc
 
     thumb_path = THUMB_DIR / f"{card_id.lower()}.jpg"
     try:
@@ -767,6 +826,7 @@ def _merge_recognition(results: list[dict]) -> dict:
         "results": results,
         "errors": [],
         "backup": "",
+        "draft_entries": [],
     }
     for result in results:
         if result.get("error"):
@@ -776,6 +836,8 @@ def _merge_recognition(results: list[dict]) -> dict:
             merged[key] += int(result.get(key) or 0)
         merged["total"] = int(result.get("total") or merged["total"])
         merged["cards"].extend(result.get("cards") or [])
+        if result.get("draft_entry"):
+            merged["draft_entries"].append(result["draft_entry"])
         if result.get("backup"):
             merged["backup"] = result["backup"]
     first = next((item for item in results if not item.get("error")), {})
@@ -785,13 +847,18 @@ def _merge_recognition(results: list[dict]) -> dict:
     return merged
 
 
-async def recognize_card(image: object, card_id: object, provider: object = "") -> dict:
+async def recognize_card(
+    image: object, card_id: object, provider: object = "", commit: bool = True
+) -> dict:
     """Crop an upload into cards and recognize each card separately.
+
+    Uses AI coordinate detection first, then local cropping, then recognition.
 
     Args:
         image: Raw image bytes or a ``data:image/...;base64,``/base64 string.
         card_id: Card art id supplied by the user for the first card.
         provider: Optional vision provider id; falls back to plugin config.
+        commit: Write recognized cards to the table; False returns drafts only.
 
     Returns:
         Combined import summary with one entry per detected card.
@@ -815,9 +882,57 @@ async def recognize_card(image: object, card_id: object, provider: object = "") 
             image_bytes, _ = _normalize_image(bytes(image))
         else:
             image_bytes, _ = _decode_upload_image(image)
-        crops = card_crop.crop_card_images(image_bytes)
+
+        # 使用 AI 模型检测卡图坐标（参考图不存在时不传，避免干扰模型）
+        reference_card_path = os.path.join(
+            os.path.dirname(__file__), "deck_card_thumbs", "reference.jpg"
+        )
+        if not os.path.exists(reference_card_path):
+            reference_card_path = None
+
+        coordinates = await card_crop.detect_card_coordinates(
+            image_bytes,
+            context=_context,
+            provider=provider or DEFAULT_VISION_PROVIDER,
+            reference_image_path=reference_card_path,
+        )
+        if not coordinates:
+            logger.warning("AI 检测返回空坐标列表")
+            raise CardImportError("未检测到卡图，请确保图片包含清晰的卡牌")
+        else:
+            logger.info("AI 检测到的坐标: %s", coordinates)
     except ValueError as exc:
         raise CardImportError(str(exc)) from exc
+
+    # 手动裁剪卡图（使用与 crop_card_images 相同的逻辑）
+    crops: list[bytes] = []
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as source:
+            frames = getattr(source, "n_frames", 1)
+            source.load()
+            image_orig = source.convert("RGB")
+    except (OSError, ValueError) as exc:
+        raise CardImportError("无法识别该图片，请上传 JPG/PNG/WebP 卡图") from exc
+
+    if frames > 1:
+        raise CardImportError("动图不是卡图，请发送静态 JPG/PNG/WebP 卡图")
+    if min(image_orig.size) < 200 or image_orig.width * image_orig.height < 40000:
+        raise CardImportError("图片太小，无法识别卡图；请发送清晰完整的 JPG/PNG/WebP 卡图")
+
+    # 对每个坐标进行裁剪。坐标已由 detect_card_coordinates 做过边缘精修，
+    # 这里只保留 1 像素安全边，避免之前固定 5% padding 把背景一起带进来。
+    for x0, y0, x1, y1 in coordinates:
+        crop = image_orig.crop(
+            (
+                max(0, x0 - 1),
+                max(0, y0 - 1),
+                min(image_orig.width, x1 + 1),
+                min(image_orig.height, y1 + 1),
+            )
+        )
+        buffer = io.BytesIO()
+        crop.save(buffer, "JPEG", quality=92, optimize=True)
+        crops.append(buffer.getvalue())
 
     results: list[dict] = []
     for index, crop in enumerate(crops):
@@ -828,6 +943,7 @@ async def recognize_card(image: object, card_id: object, provider: object = "") 
                 current_id,
                 provider,
                 existing_id if index == 0 else "",
+                commit,
             )
             result["index"] = index + 1
             results.append(result)
@@ -891,6 +1007,7 @@ ROUTES = [
     ("manual/clear", clear_deck, ["POST"], "手动卡组：清空"),
     ("manual/render", render_deck, ["POST"], "手动卡组：生成图片"),
     ("manual/thumb", card_thumb, ["GET"], "手动卡组：卡图"),
+    ("manual/card-image", card_image_data, ["GET"], "手动卡组：单卡预览图"),
 ]
 
 

@@ -1,13 +1,15 @@
 import asyncio
 import json
 import re
+import secrets
+import string
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import aiohttp
 
-from astrbot.api import logger
+from astrbot.api import llm_tool, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Star, register
 from astrbot.core.message.components import Image, Plain
@@ -20,16 +22,16 @@ from . import dynamic_render as dr
 from .media_cache import ImageCache
 
 COOLDOWN = 3.0
-PENDING_IMPORT_TTL = 300
+PENDING_IMPORT_TTL = 60
 SEARCH_PAGE_SIZE = 15
-SEARCH_PAGE_TTL = 600
+SEARCH_PAGE_TTL = 300
 _last = {}
 # Persist the "command then image" state so a plugin reload cannot silently
-# swallow the card image the user sends afterwards.
+# swallow the card images the user sends afterwards.
 PENDING_IMPORT_FILE = data_paths.PENDING_IMPORT_FILE
 
 
-def _load_pending_imports() -> dict[str, tuple[str, float]]:
+def _load_pending_imports() -> dict[str, tuple[str, float, str]]:
     """Read pending card imports left over from a previous plugin process."""
     try:
         data = json.loads(PENDING_IMPORT_FILE.read_text(encoding="utf-8"))
@@ -37,11 +39,15 @@ def _load_pending_imports() -> dict[str, tuple[str, float]]:
         return {}
     if not isinstance(data, dict):
         return {}
-    result: dict[str, tuple[str, float]] = {}
-    for uid, item in data.items():
-        if isinstance(item, list) and len(item) == 2:
+    result: dict[str, tuple[str, float, str]] = {}
+    for key, item in data.items():
+        if isinstance(item, list) and len(item) in (2, 3):
             try:
-                result[str(uid)] = (str(item[0]), float(item[1]))
+                result[str(key)] = (
+                    str(item[0]),
+                    float(item[1]),
+                    str(item[2]) if len(item) == 3 else "",
+                )
             except (TypeError, ValueError):
                 continue
     return result
@@ -61,12 +67,26 @@ class SearchPage:
         return max(1, (len(self.ids) + SEARCH_PAGE_SIZE - 1) // SEARCH_PAGE_SIZE)
 
 
-# sender_id -> (card_id, expires_at) for the "command then image" flow.
-_pending_import: dict[str, tuple[str, float]] = _load_pending_imports()
+# session_id -> (card_id, expires_at, sender_id) for the "command then image" flow.
+_pending_import: dict[str, tuple[str, float, str]] = _load_pending_imports()
 # sender_id -> paged search results, advanced by sending `#`.
 _search_pages: dict[str, SearchPage] = {}
 # sender_id -> import id of the most recently imported/recognized card.
 _last_import: dict[str, str] = {}
+
+
+def _known_card_ids() -> set[str]:
+    """Card art ids and short import ids currently present in the card table."""
+    ids: set[str] = set()
+    for import_id, row in deck_code.CARDS.items():
+        short = str(import_id or "").strip().lower()
+        if short:
+            ids.add(short)
+        if row:
+            art_id = str(row[0] or "").strip().lower()
+            if art_id:
+                ids.add(art_id)
+    return ids
 
 
 def _save_pending_imports() -> None:
@@ -74,8 +94,8 @@ def _save_pending_imports() -> None:
     try:
         PENDING_IMPORT_FILE.parent.mkdir(parents=True, exist_ok=True)
         data = {
-            uid: [card_id, expires]
-            for uid, (card_id, expires) in _pending_import.items()
+            key: [card_id, expires, sender]
+            for key, (card_id, expires, sender) in _pending_import.items()
         }
         temp = PENDING_IMPORT_FILE.with_suffix(".tmp")
         temp.write_text(
@@ -84,6 +104,64 @@ def _save_pending_imports() -> None:
         temp.replace(PENDING_IMPORT_FILE)
     except (OSError, TypeError, ValueError) as exc:
         logger.warning("Failed to save pending card imports: %s", exc)
+
+
+def _arm_pending(session_key: str, card_id: str, sender: str) -> None:
+    """Arm one session for card-image recognition for PENDING_IMPORT_TTL seconds."""
+    key = str(session_key or "").strip() or str(sender or "").strip()
+    if not key:
+        return
+    _pending_import[key] = (
+        str(card_id or ""),
+        time.time() + PENDING_IMPORT_TTL,
+        str(sender or ""),
+    )
+    _save_pending_imports()
+
+
+# sender_id -> {"temp_id": str, "cards": [entry, ...], "created_at": float}
+# Recognized cards stay here until the user says 同意 / runs `kards confirm`.
+TEMP_DRAFT_FILE = data_paths.TEMP_IMPORT_FILE
+
+
+def _load_temp_drafts() -> dict[str, dict]:
+    """Read card drafts waiting for the user's confirmation."""
+    try:
+        data = json.loads(TEMP_DRAFT_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    result: dict[str, dict] = {}
+    for key, item in data.items():
+        if isinstance(item, dict) and isinstance(item.get("cards"), list):
+            result[str(key)] = item
+    return result
+
+
+_temp_drafts: dict[str, dict] = _load_temp_drafts()
+
+
+def _save_temp_drafts() -> None:
+    """Persist waiting card drafts atomically."""
+    try:
+        TEMP_DRAFT_FILE.parent.mkdir(parents=True, exist_ok=True)
+        temp = TEMP_DRAFT_FILE.with_suffix(".tmp")
+        temp.write_text(
+            json.dumps(_temp_drafts, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        temp.replace(TEMP_DRAFT_FILE)
+    except (OSError, TypeError, ValueError) as exc:
+        logger.warning("Failed to save temporary card drafts: %s", exc)
+
+
+def _new_temp_card_id() -> str:
+    """Return an unused two-character base62 short code."""
+    alphabet = string.ascii_letters + string.digits
+    while True:
+        code = "".join(secrets.choice(alphabet) for _ in range(2))
+        if code not in deck_code.CARDS:
+            return code
 
 
 DEFAULT_UID = "2127596945"
@@ -133,8 +211,10 @@ HELP_TEXT = (
     "kards alias 卡名 ～ 别名            给卡牌加别名\n"
     "kards alias list                     查看别名库\n"
     "kards alias del 别名                 删除别名\n"
-    "kards import [JSON]                  导入官方新卡牌\n"
-    "kards import 卡牌ID                  私聊：先发指令，再发卡图自动识别导入\n"
+    "kards import                         生成两位临时短码，发卡图后先出草稿\n"
+    "kards import 卡牌ID/JSON/文件名      按指定 ID 导入，或发完整卡图自动识别\n"
+    "kards confirm / 回复“同意”           把草稿同步到正式卡表（确认后才写入）\n"
+    "kards cancel                         放弃待确认的卡牌草稿\n"
     "kards fix <字段> <新值>              修改刚导入卡牌的识别错误\n"
     "kards fix <卡牌> <字段> <新值>       修改指定卡牌的字段\n"
     "kards setid 临时ID/卡名 永久ID       设置新卡永久 ID（2 位字母/数字）\n"
@@ -229,6 +309,8 @@ class BiliKards(Star):
             cache_ttl=_int_option(
                 self.config, "cache_ttl", DEFAULT_CACHE_TTL, minimum=0
             ),
+            proxy=self.config.get("bili_proxy") or None,
+            cookie=self.config.get("bili_cookie") or None,
         )
         self.images = ImageCache(
             max_images=_int_option(
@@ -434,7 +516,10 @@ class BiliKards(Star):
             f"搜索「{state.query}」：第 {state.page}/{state.pages} 页，"
             f"共 {len(state.ids)} 张"
         ]
-        lines.extend("- " + self._card_label(item) for item in ids)
+        lines.extend(
+            f"{number}. " + self._card_label(import_id)
+            for number, import_id in enumerate(ids, 1)
+        )
         if state.page < state.pages:
             lines.append("发送 # 查看下一页")
         else:
@@ -457,7 +542,14 @@ class BiliKards(Star):
             self.logger.warning("Search grid render failed: %s", exc)
             yield event.plain_result(text)
             return
-        yield event.chain_result(_chain_with_pics(text, [str(path)]))
+
+        self.logger.info(
+            "Search grid: %s (%d bytes)", path, path.stat().st_size
+        )
+        # QQ Official C2C 在同一条消息里混排文字和图片时会走富媒体 msg_type=7，
+        # 图片可能不显示。文字和卡图分两条发，图片单独发更稳。
+        yield event.plain_result(text)
+        yield event.chain_result([Image.fromFileSystem(str(path))])
 
     async def _manual_search(self, event: AstrMessageEvent, kw):
         name = (kw or "").strip()
@@ -484,6 +576,10 @@ class BiliKards(Star):
             expires_at=time.time() + SEARCH_PAGE_TTL,
         )
         _search_pages[str(event.get_sender_id())] = state
+        if len(matches) == 1:
+            async for result in self._send_single_card(event, state, 1, sole=True):
+                yield result
+            return
         async for result in self._send_search_page(event, state):
             yield result
 
@@ -514,6 +610,110 @@ class BiliKards(Star):
             return
         state.page += 1
         async for result in self._send_search_page(event, state):
+            yield result
+
+    async def _send_single_card(
+        self, event: AstrMessageEvent, state: SearchPage, number: int, sole: bool = False
+    ):
+        """Send one card's art and its full JSON metadata."""
+        total = len(state.ids)
+        start = (state.page - 1) * SEARCH_PAGE_SIZE
+        page_ids = state.ids[start : start + SEARCH_PAGE_SIZE]
+        if sole and total == 1:
+            import_id = state.ids[0]
+            scope = "唯一命中"
+        elif 1 <= number <= len(page_ids):
+            import_id = page_ids[number - 1]
+            scope = f"本页第 {number} 个"
+        elif 1 <= number <= total:
+            import_id = state.ids[number - 1]
+            scope = f"全部结果第 {number} 个"
+        else:
+            yield event.plain_result(
+                f"序号超出范围：搜索「{state.query}」共 {total} 张，本页 {len(page_ids)} 张"
+            )
+            return
+
+        info = deck_code.CARDS.get(import_id)
+        if not info:
+            yield event.plain_result(f"未找到卡牌：{import_id}")
+            return
+
+        yield event.plain_result(
+            f"搜索「{state.query}」{scope}：{self._card_label(import_id)}"
+        )
+
+        if self._send_pics():
+            try:
+                path = await asyncio.to_thread(
+                    deck_image.render_single_card,
+                    self._search_items([import_id])[0],
+                    state.query,
+                    number,
+                    total,
+                )
+                yield event.chain_result([Image.fromFileSystem(str(path))])
+            except Exception as exc:
+                self.logger.warning("Single card render failed: %s", exc)
+                yield event.plain_result("单卡图渲染失败，仅发送 JSON 信息")
+
+        catalog = next(
+            (
+                card
+                for card in manual_deck.card_catalog()
+                if card.get("id") == import_id
+            ),
+            None,
+        )
+        if catalog is None:
+            catalog = {
+                "id": import_id,
+                "card_id": info[0],
+                "name": info[1] or info[2] or import_id,
+                "name_en": info[2] or "",
+                "faction": deck_code.FACTION_CN.get(info[3], info[3]),
+                "type": deck_code.TYPE_CN.get(info[4], info[4]),
+                "rarity": deck_code.RARITY_CN.get(info[5], info[5]),
+                "cost": info[6],
+                "operation": info[7],
+                "attack": info[8],
+                "defense": info[9],
+            }
+        brief = {
+            "稀有度": catalog.get("rarity_cn") or catalog.get("rarity") or "",
+            "ID": catalog.get("id") or import_id,
+            "国家": catalog.get("faction_cn") or catalog.get("faction") or "",
+        }
+        yield event.plain_result(json.dumps(brief, ensure_ascii=False, indent=2))
+
+    @filter.event_message_type(
+        filter.EventMessageType.PRIVATE_MESSAGE | filter.EventMessageType.GROUP_MESSAGE
+    )
+    async def search_pick_card(self, event: AstrMessageEvent):
+        """Send a single card image plus JSON when the user types `#第N个`."""
+        raw = str(getattr(event.message_obj, "message_str", "") or "").strip()
+        # Strip wake prefixes in any order: `#第1个`, `##第1个`, `/#第1个`.
+        while True:
+            stripped = False
+            for prefix in ("#", "／", "/"):
+                if raw.startswith(prefix):
+                    raw = raw[len(prefix) :].strip()
+                    stripped = True
+            if not stripped:
+                break
+        match = re.fullmatch(r"第\s*(\d+)\s*个", raw)
+        if not match:
+            return
+
+        sender = str(event.get_sender_id())
+        state = _search_pages.get(sender)
+        if not state:
+            return
+        if time.time() > state.expires_at:
+            _search_pages.pop(sender, None)
+            yield event.plain_result("搜索结果已过期，请重新发送 kards s 关键词")
+            return
+        async for result in self._send_single_card(event, state, int(match.group(1))):
             yield result
 
     async def _manual_alias(self, event: AstrMessageEvent, kw):
@@ -608,6 +808,24 @@ class BiliKards(Star):
             yield event.plain_result("用法：kards setid <临时ID或卡名> <永久ID>")
             return
         target, new_id = parts[0].strip(), parts[1].strip()
+        sender = str(event.get_sender_id())
+        draft = _temp_drafts.get(sender)
+        if draft and target == draft.get("temp_id") and target not in deck_code.CARDS:
+            if not manual_deck._is_valid_permanent_import_id(new_id):
+                yield event.plain_result("永久 ID 必须是 2 位字母或数字")
+                return
+            for entry in draft.get("cards", []):
+                if entry.get("importId") == target:
+                    entry["importId"] = new_id
+                if entry.get("cardId") == target:
+                    entry["cardId"] = new_id
+            draft["temp_id"] = new_id
+            _save_temp_drafts()
+            yield event.plain_result(
+                f"已将待确认卡牌短码 {target} 改为 {new_id}；"
+                "回复“同意”或发送 kards confirm 后同步到正式卡表。"
+            )
+            return
         try:
             result = manual_deck.set_permanent_id(target, new_id)
         except ValueError as exc:
@@ -732,42 +950,59 @@ class BiliKards(Star):
 
     async def _manual_import(self, event: AstrMessageEvent, kw):
         text = (kw or "").strip()
-        # Private chat: `kards import <card_id>` arms the next image message.
+        # `kards import <card_id>` arms this session for one minute.  Every image
+        # from the same sender in the same session during that window is imported.
         if (
             text
-            and event.is_private_chat()
             and not text.startswith(("[", "{"))
             and re.fullmatch(r"[0-9A-Za-z_\-]+", text)
         ):
-            sender = event.get_sender_id()
+            sender = str(event.get_sender_id())
+            session_key = str(event.get_session_id() or "") or sender
             images = [item for item in event.get_messages() if isinstance(item, Image)]
+            _arm_pending(session_key, text, sender)
             if images:
-                _pending_import.pop(sender, None)
-                _save_pending_imports()
                 self.logger.info("Card import image in command: id=%s", text)
                 async for result in self._import_card_image(event, images[0], text):
                     yield result
                 return
-            _pending_import[sender] = (text, time.time() + PENDING_IMPORT_TTL)
-            _save_pending_imports()
-            self.logger.info("Card import armed for %s: %s", sender, text)
+            self.logger.info(
+                "Card import armed for session %s by %s: %s", session_key, sender, text
+            )
             yield event.plain_result(
                 f"已记录卡牌 ID：{text}。请在 {PENDING_IMPORT_TTL // 60} 分钟内"
-                "紧接着发送卡牌图片，我会自动识别并导入。"
+                "于本会话发送完整卡图（含卡名、费用、攻防和描述文本框）；"
+                "这段时间内发送的多张图片会按此 ID 逐张识别。"
+                "只发卡面插画、手机截图或动图无法识别。"
             )
             return
         if not text:
-            path = data_paths.NEW_CARDS_FILE
-            if not path.is_file():
-                yield event.plain_result(
-                    "用法：\n"
-                    "kards import [卡牌JSON]\n"
-                    "或把官方卡牌文件放到 " + str(path) + " 后发送 kards import\n"
-                    "也可以直接在插件页面「手动卡组」里导入。"
-                )
+            # No id supplied: allocate a fresh two-character base62 short code,
+            # recognize the following images as a draft, then wait for 同意.
+            sender = str(event.get_sender_id())
+            session_key = str(event.get_session_id() or "") or sender
+            code = _new_temp_card_id()
+            _temp_drafts[sender] = {
+                "temp_id": code,
+                "cards": [],
+                "created_at": time.time(),
+            }
+            _save_temp_drafts()
+            _arm_pending(session_key, code, sender)
+            images = [item for item in event.get_messages() if isinstance(item, Image)]
+            if images:
+                self.logger.info("Card import image with generated id=%s", code)
+                async for result in self._import_card_image(event, images[0], code):
+                    yield result
                 return
-            payload = path.read_text(encoding="utf-8")
-            source = str(path)
+            yield event.plain_result(
+                f"已生成临时短码：{code}。请在 {PENDING_IMPORT_TTL // 60} 分钟内"
+                "于本会话发送完整卡图（含卡名、费用、攻防和描述文本框）。"
+                "识别后先不写入卡表；回复“同意”或发送 kards confirm 才会同步正式 ID。"
+                "临时短码可用 kards setid <短码> <正式ID> 提前指定；"
+                "取消请发送 kards cancel。"
+            )
+            return
         elif text.startswith("[") or text.startswith("{"):
             payload = text
             source = "聊天消息"
@@ -841,8 +1076,11 @@ class BiliKards(Star):
             self.logger.warning("Card image download failed: %s", exc)
             yield event.plain_result("卡图下载失败，请重新发送。")
             return
+        sender = str(event.get_sender_id())
+        draft = _temp_drafts.get(sender)
+        is_draft = bool(draft and draft.get("temp_id") == card_id)
         try:
-            summary = await web_api.recognize_card(data, card_id)
+            summary = await web_api.recognize_card(data, card_id, commit=not is_draft)
         except web_api.CardImportError as exc:
             yield event.plain_result(f"卡图导入失败：{exc}")
             return
@@ -854,9 +1092,31 @@ class BiliKards(Star):
         results = summary.get("results") or [summary]
         imported = [item for item in results if not item.get("error")]
         if imported and imported[0].get("import_id"):
-            _last_import[str(event.get_sender_id())] = imported[0]["import_id"]
+            _last_import[sender] = imported[0]["import_id"]
+        if is_draft:
+            entries = summary.get("draft_entries") or []
+            if entries:
+                cards = draft.setdefault("cards", [])
+                seen = {
+                    (str(item.get("cardId") or ""), str(item.get("name_zh") or ""))
+                    for item in cards
+                }
+                for entry in entries:
+                    key = (
+                        str(entry.get("cardId") or ""),
+                        str(entry.get("name_zh") or ""),
+                    )
+                    if key not in seen:
+                        cards.append(entry)
+                        seen.add(key)
+                draft.setdefault("created_at", time.time())
+                _save_temp_drafts()
         lines = [
-            f"卡牌导入完成：识别到 {len(results)} 张，成功 {len(imported)} 张",
+            (
+                f"卡图识别草稿（临时短码 {card_id}）：识别到 {len(results)} 张"
+                if is_draft
+                else f"卡牌导入完成：识别到 {len(results)} 张"
+            ),
             f"新增 {summary['added']} · 更新 {summary['updated']} · "
             f"未变 {summary['unchanged']} · 共 {summary['total']} 张",
         ]
@@ -885,9 +1145,15 @@ class BiliKards(Star):
             lines.append("- 失败：" + str(error))
         if summary.get("backup"):
             lines.append("备份：" + summary["backup"])
-        lines.append(
-            "识别有误可用 kards fix <字段> <新值> 修正；临时 ID 可用 kards setid 改永久 ID"
-        )
+        if is_draft:
+            lines.append(
+                "尚未写入卡表。确认无误请回复“同意”或发送 kards confirm 同步正式 ID；"
+                "如需改号发送 kards setid " + card_id + " <正式ID>；放弃发送 kards cancel。"
+            )
+        else:
+            lines.append(
+                "识别有误可用 kards fix <字段> <新值> 修正；临时 ID 可用 kards setid 改永久 ID"
+            )
         yield event.plain_result("\n".join(lines))
 
     async def _manual_set_faction(self, event: AstrMessageEvent, kw, ally=False):
@@ -990,16 +1256,19 @@ class BiliKards(Star):
         filter.EventMessageType.PRIVATE_MESSAGE | filter.EventMessageType.GROUP_MESSAGE
     )
     async def import_pending_card_image(self, event: AstrMessageEvent):
-        """Import an image sent after ``kards import <id>``.
+        """Import images sent after ``kards import <id>``.
 
-        The pending id is also looked up by session so a reload or a slightly
-        different sender id cannot swallow the follow-up image.  A card id in
-        the image caption/file name works without a prior command as well.
+        A command arms the current session for one minute.  Every image from
+        the same sender in that session during the window is imported with the
+        same card id.  Without a pending command, only a caption/file name
+        containing a *known* card id is accepted; random images and generated
+        file names are ignored.
 
         Args:
             event: Message event carrying the card image.
         """
         sender = str(event.get_sender_id())
+        session_key = str(event.get_session_id() or "")
         text = (event.get_message_str() or "").strip()
         images = [item for item in event.get_messages() if isinstance(item, Image)]
         if not images:
@@ -1019,42 +1288,59 @@ class BiliKards(Star):
         card_id = ""
         matched_key = ""
         expires_at = 0.0
-        for key in (sender, str(event.get_session_id() or "")):
+        for key in (session_key, sender):
             if not key:
                 continue
             pending = _pending_import.get(key)
-            if pending:
-                card_id, expires_at = pending
-                matched_key = key
-                break
+            if not pending:
+                continue
+            pending_id, pending_expiry, allowed_sender = pending
+            if allowed_sender and allowed_sender != sender:
+                continue
+            card_id, expires_at, matched_key = pending_id, pending_expiry, key
+            break
 
-        if matched_key:
-            if time.time() > expires_at:
-                _pending_import.pop(matched_key, None)
-                _save_pending_imports()
-                yield event.plain_result(
-                    "卡图导入已超时，请重新发送 kards import <卡牌ID>。"
+        if not matched_key:
+            # 没有 pending 时，只允许“说明文字/文件名 = 卡表里已有的卡牌 ID”。
+            # QQ 随机文件名和机器人生成的拼图名都不在卡表里，会被安全忽略。
+            candidates = []
+            if re.fullmatch(r"[0-9A-Za-z_\-]{2,}", text):
+                candidates.append(text)
+            raw_name = str(getattr(images[0], "file", "") or "")
+            name = re.sub(r"\.[^.]+$", "", Path(raw_name).name)
+            if re.fullmatch(r"[0-9A-Za-z_\-]{2,}", name):
+                candidates.append(name)
+            known = _known_card_ids()
+            for candidate in candidates:
+                if candidate.lower() in known:
+                    card_id = candidate
+                    break
+            if not card_id:
+                self.logger.debug(
+                    "Ignore image without known card id: sender=%s candidates=%s",
+                    sender,
+                    candidates,
                 )
                 return
-        else:
-            # No pending command: accept an id from the caption or file name.
-            if re.fullmatch(r"[0-9A-Za-z_\-]{2,}", text):
-                card_id = text
-            else:
-                raw_name = str(getattr(images[0], "file", "") or "")
-                name = re.sub(r"\.[^.]+$", "", Path(raw_name).name)
-                if re.fullmatch(r"[0-9A-Za-z_\-]{2,}", name):
-                    card_id = name
-            if not card_id:
-                return
-
-        _pending_import.pop(sender, None)
-        if matched_key:
+        if matched_key and time.time() > expires_at:
             _pending_import.pop(matched_key, None)
-        _save_pending_imports()
-        self.logger.info("Card image import started: sender=%s id=%s", sender, card_id)
-        async for result in self._import_card_image(event, images[0], card_id):
-            yield result
+            _save_pending_imports()
+            yield event.plain_result(
+                "卡图导入已超时，请重新发送 kards import <卡牌ID>。"
+            )
+            return
+
+        # Keep the pending state until its one-minute expiry so several images
+        # sent in the same session can be imported with the same card id.
+        self.logger.info(
+            "Card image import started: sender=%s session=%s id=%s",
+            sender,
+            session_key,
+            card_id,
+        )
+        for image in images:
+            async for result in self._import_card_image(event, image, card_id):
+                yield result
 
     @filter.event_message_type(
         filter.EventMessageType.PRIVATE_MESSAGE | filter.EventMessageType.GROUP_MESSAGE
@@ -1268,6 +1554,265 @@ class BiliKards(Star):
             lines.append(f"{i} {plain(r.get('title') or '-')}")
             lines.append(f"   {r.get('author') or '-'}  播放 {fmt_num(r.get('play'))}")
         yield event.plain_result("\n".join(lines))
+
+    async def _confirm_draft(self, event: AstrMessageEvent):
+        """Commit a recognized draft into the official local card table."""
+        sender = str(event.get_sender_id())
+        draft = _temp_drafts.pop(sender, None)
+        if not draft or not draft.get("cards"):
+            _save_temp_drafts()
+            yield event.plain_result("没有待确认的卡牌草稿。")
+            return
+        try:
+            summary = manual_deck.import_cards(draft["cards"])
+        except ValueError as exc:
+            _temp_drafts[sender] = draft
+            _save_temp_drafts()
+            yield event.plain_result("同步卡表失败：" + str(exc))
+            return
+        except Exception as exc:
+            _temp_drafts[sender] = draft
+            _save_temp_drafts()
+            self.logger.warning("Confirm card draft failed: %s", exc)
+            yield event.plain_result("同步卡表失败，请查看 AstrBot 日志")
+            return
+        _save_temp_drafts()
+        if summary.get("cards"):
+            _last_import[sender] = summary["cards"][0]["id"]
+        lines = [
+            f"已同意并同步正式 ID：{draft.get('temp_id', '')}",
+            f"新增 {summary['added']} · 更新 {summary['updated']} · "
+            f"未变 {summary['unchanged']} · 共 {summary['total']} 张",
+        ]
+        for item in summary["cards"][:12]:
+            lines.append(f"- {item['name']}（{item['id']}）")
+        if summary.get("backup"):
+            lines.append("备份：" + summary["backup"])
+        yield event.plain_result("\n".join(lines))
+
+    async def _cancel_draft(self, event: AstrMessageEvent):
+        """Discard the waiting card draft for this sender."""
+        sender = str(event.get_sender_id())
+        draft = _temp_drafts.pop(sender, None)
+        _save_temp_drafts()
+        if not draft:
+            yield event.plain_result("没有待确认的卡牌草稿。")
+            return
+        yield event.plain_result(
+            f"已放弃临时短码 {draft.get('temp_id', '')} 的卡牌草稿，卡表未改动。"
+        )
+
+    @filter.event_message_type(
+        filter.EventMessageType.PRIVATE_MESSAGE | filter.EventMessageType.GROUP_MESSAGE
+    )
+    async def confirm_draft_message(self, event: AstrMessageEvent):
+        """Accept a plain “同意” after a draft import, or “取消” to discard it."""
+        sender = str(event.get_sender_id())
+        if sender not in _temp_drafts:
+            return
+        raw = str(getattr(event.message_obj, "message_str", "") or "").strip()
+        for prefix in ("#", "／", "/"):
+            if raw.startswith(prefix):
+                raw = raw[len(prefix) :].strip()
+        if raw in {"同意", "确认", "确认导入", "好的"}:
+            async for result in self._confirm_draft(event):
+                yield result
+        elif raw in {"取消", "撤销", "不要"}:
+            async for result in self._cancel_draft(event):
+                yield result
+
+    # ---------- LLM tools ----------
+    # Every chat command is also exposed as a function-calling tool so the LLM
+    # can run the exact same logic without asking the user to type `#kards ...`.
+
+    async def _tool_kards(self, event: AstrMessageEvent, sub: str, kw: str = ""):
+        """Internal helper: dispatch a tool call through the normal command path."""
+        args = " ".join(part for part in (sub, str(kw or "").strip()) if part)
+        async for result in self.kards(event, GreedyStr(args)):
+            yield result
+
+    @llm_tool(name="kards_help")
+    async def tool_help(self, event: AstrMessageEvent):
+        """查看 KARDS 助手支持的全部命令和用法。"""
+        yield event.plain_result(HELP_TEXT)
+
+    @llm_tool(name="kards_deck_parse")
+    async def tool_deck_parse(self, event: AstrMessageEvent, code: str):
+        """解析 KARDS 卡组码，生成卡表、卡图和信息图。
+
+        Args:
+            code(string): 卡组码，通常以 %% 开头。
+        """
+        async for result in self._tool_kards(event, "deck", code):
+            yield result
+
+    @llm_tool(name="kards_news")
+    async def tool_news(self, event: AstrMessageEvent, index: str):
+        """查看 KARDS 官方 B 站动态；index 为空表示最新若干条。
+
+        Args:
+            index(string): 倒数第几条动态（1-20），留空查看最新动态，填 list 查看标题列表。
+        """
+        async for result in self._tool_kards(event, "news", index):
+            yield result
+
+    @llm_tool(name="kards_news_refresh")
+    async def tool_news_refresh(self, event: AstrMessageEvent):
+        """跳过缓存，重新拉取 KARDS 官方 B 站动态。"""
+        async for result in self._tool_kards(event, "刷新动态"):
+            yield result
+
+    @llm_tool(name="kards_video_search")
+    async def tool_video_search(self, event: AstrMessageEvent, keyword: str):
+        """搜索 B 站上的 KARDS 相关视频。
+
+        Args:
+            keyword(string): 视频搜索关键词。
+        """
+        async for result in self._tool_kards(event, "now", keyword):
+            yield result
+
+    @llm_tool(name="kards_card_search")
+    async def tool_card_search(self, event: AstrMessageEvent, query: str):
+        """搜索本地 KARDS 卡表，支持名称、别名、描述、标签和属性筛选。
+
+        Args:
+            query(string): 搜索词，如“德国 坦克 6K2/5/4 闪击”。
+        """
+        async for result in self._manual_search(event, query):
+            yield result
+
+    @llm_tool(name="kards_alias_add")
+    async def tool_alias_add(self, event: AstrMessageEvent, card: str, alias: str):
+        """给一张卡牌添加别名。
+
+        Args:
+            card(string): 卡牌名称或导入 ID。
+            alias(string): 要添加的别名。
+        """
+        async for result in self._manual_alias(event, f"{card} ～ {alias}"):
+            yield result
+
+    @llm_tool(name="kards_alias_list")
+    async def tool_alias_list(self, event: AstrMessageEvent):
+        """查看当前已保存的全部卡牌别名。"""
+        async for result in self._manual_alias(event, "list"):
+            yield result
+
+    @llm_tool(name="kards_alias_delete")
+    async def tool_alias_delete(self, event: AstrMessageEvent, alias: str):
+        """删除一个卡牌别名。
+
+        Args:
+            alias(string): 要删除的别名。
+        """
+        async for result in self._manual_alias(event, f"del {alias}"):
+            yield result
+
+    @llm_tool(name="kards_import")
+    async def tool_import(self, event: AstrMessageEvent, payload: str):
+        """导入卡牌数据，或生成两位临时 ID 后等待发送卡图识别。
+
+        Args:
+            payload(string): 卡牌 ID、JSON 数组或数据文件名；留空则生成两位 base62 临时 ID。
+        """
+        async for result in self._manual_import(event, payload):
+            yield result
+
+    @llm_tool(name="kards_setid")
+    async def tool_setid(self, event: AstrMessageEvent, target: str, permanent_id: str):
+        """把临时卡牌 ID 设置成正式的 2 位字母/数字 ID。
+
+        Args:
+            target(string): 临时 ID 或卡牌名称。
+            permanent_id(string): 新的 2 位正式 ID。
+        """
+        async for result in self._manual_set_id(event, f"{target} {permanent_id}"):
+            yield result
+
+    @llm_tool(name="kards_fix")
+    async def tool_fix(self, event: AstrMessageEvent, args: str):
+        """修正最近识别卡牌或指定卡牌的识别错误字段。
+
+        Args:
+            args(string): 如“阵营 德国”或“卡牌名 费用 3”。
+        """
+        async for result in self._manual_fix(event, args):
+            yield result
+
+    @llm_tool(name="kards_deck_add")
+    async def tool_deck_add(self, event: AstrMessageEvent, card: str, count: float = 1):
+        """向当前用户的手动卡组添加卡牌。
+
+        Args:
+            card(string): 卡牌名称或导入 ID。
+            count(number): 添加张数，默认 1。
+        """
+        amount = max(1, int(count or 1))
+        async for result in self._manual_add(event, f"{card} x{amount}"):
+            yield result
+
+    @llm_tool(name="kards_deck_remove")
+    async def tool_deck_remove(self, event: AstrMessageEvent, card: str, count: float = 1):
+        """从当前用户的手动卡组移除卡牌。
+
+        Args:
+            card(string): 卡牌名称或导入 ID。
+            count(number): 移除张数，默认 1。
+        """
+        amount = max(1, int(count or 1))
+        async for result in self._manual_remove(event, f"{card} x{amount}"):
+            yield result
+
+    @llm_tool(name="kards_deck_list")
+    async def tool_deck_list(self, event: AstrMessageEvent):
+        """以文字列出当前用户的手动卡组。"""
+        async for result in self._manual_list(event):
+            yield result
+
+    @llm_tool(name="kards_deck_show")
+    async def tool_deck_show(self, event: AstrMessageEvent):
+        """生成当前用户手动卡组的卡图。"""
+        async for result in self._manual_show(event):
+            yield result
+
+    @llm_tool(name="kards_deck_clear")
+    async def tool_deck_clear(self, event: AstrMessageEvent):
+        """清空当前用户的手动卡组。"""
+        async for result in self._manual_clear(event):
+            yield result
+
+    @llm_tool(name="kards_main_faction")
+    async def tool_main_faction(self, event: AstrMessageEvent, faction: str):
+        """设置当前用户手动卡组的主国。
+
+        Args:
+            faction(string): 国家名称，如“德国”。
+        """
+        async for result in self._manual_set_faction(event, faction, ally=False):
+            yield result
+
+    @llm_tool(name="kards_ally_faction")
+    async def tool_ally_faction(self, event: AstrMessageEvent, faction: str):
+        """设置当前用户手动卡组的盟国。
+
+        Args:
+            faction(string): 国家名称，如“苏联”。
+        """
+        async for result in self._manual_set_faction(event, faction, ally=True):
+            yield result
+
+    @llm_tool(name="kards_confirm")
+    async def tool_confirm(self, event: AstrMessageEvent):
+        """同意并写入上次识别后待确认的卡牌到正式卡表。"""
+        async for result in self._confirm_draft(event):
+            yield result
+
+    @llm_tool(name="kards_cancel")
+    async def tool_cancel(self, event: AstrMessageEvent):
+        """取消上次识别后待确认的卡牌草稿。"""
+        async for result in self._cancel_draft(event):
+            yield result
 
     async def terminate(self):
         if self.sess and not self.sess.closed:

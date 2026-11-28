@@ -29,8 +29,10 @@ BiliKards 是一个 KARDS B 站助手插件，包含两大核心功能：
   send_pics              是否推送图片，关闭后动态只发文字，卡牌搜索也不附带卡图
   max_pics_per_item      每条动态最多推送的图片数，0 表示不推送图片，默认 9
   deck_image             卡组是否生成卡组图片，关闭后只发送文字卡表
-  vision_provider_id     卡图识别使用的视觉模型，默认 openai_1/Gemma-4-31B-IT
+  vision_provider_id     卡图识别使用的视觉模型，默认 openai-responses/Sage-S2.1-Flash
                          识别失败或超时会自动回退到其他图片模型
+  bili_proxy             B 站请求代理，如 http://127.0.0.1:7890；服务器 IP 被 412 风控时填写
+  bili_cookie            B 站登录 Cookie，如 SESSDATA=xxx; buvid3=xxx；与代理二选一或同时填
 
 ----------------------------------------------------------------
   三、主要模块说明
@@ -119,10 +121,17 @@ BiliKards 是一个 KARDS B 站助手插件，包含两大核心功能：
        → 以“序号. 【标签】时间 标题”格式逐段链发
 
 四、卡图识别流程：
-  私聊：`kards import <卡牌ID>` → 记录 pending → 收卡图 → 发送“再发一张”
+  `kards import`（不带参数）→ 随机生成二位 base62 临时短码，当前会话 pending 有效期 1 分钟
+       → 这 1 分钟内，同一发送者在该会话发送的所有图片都按该短码识别
+       → 识别结果先存为草稿，不写入卡表；回复“同意”或 kards confirm 后才同步正式 ID
+       → kards cancel / 回复“取消” 放弃草稿；kards setid <短码> <正式ID> 可在确认前改号
+  `kards import <卡牌ID>` → 直接按指定 ID 识别并写入卡表
+       → 未执行 import 命令时，仅当说明文字/文件名是卡表中已有的卡牌ID或导入ID才识别
+       → 随机文件名、普通图片和机器人生成的图片不会误导入
+       → 必须是完整卡图（含卡名/费用/攻防/描述文本框），只发插画、截图或动图会拒绝
        → card_crop 裁掉卡图外内容，多张卡拆成单张
        → web_api.recognize_card 每张卡分别调用视觉模型识别 JSON
-       → import_cards 合并进本地卡表（额外卡用 DIY- 临时 ID）
+       → 确认后 import_cards 合并进本地卡表
        → 显示逐张导入结果
 
 ----------------------------------------------------------------
@@ -134,11 +143,15 @@ BiliKards 是一个 KARDS B 站助手插件，包含两大核心功能：
   kards now <关键词>     搜索 KARDS 相关视频
   kards s <关键词>      搜索本地卡表（含别名/描述/标签/属性）
                          超过 15 张自动分页，发 # 查看下一页
+                         发 #第N个 单独看第 N 张卡的卡图+JSON
+                         只命中 1 张时直接发单卡图+JSON
   kards alias 卡名 ～ 别名  给卡牌加别名
   kards alias list       查看别名库
   kards alias del 别名   删除别名
-  kards import [JSON]   导入官方新卡牌
-  kards import <ID>     私聊：先发指令，再发卡图自动识别导入
+  kards import          生成二位临时短码，发卡图后出草稿（不立即写卡表）
+  kards import <ID/JSON/文件名>  按指定 ID 导入，或发完整卡图自动识别
+  kards confirm / 回复“同意”    把草稿同步到正式卡表
+  kards cancel          放弃待确认草稿
   kards fix <字段> <新值>              修改刚导入卡牌的识别错误
   kards fix <卡牌> <字段> <新值>       修改指定卡牌字段
   kards setid 临时ID/卡名 永久ID       设置新卡永久 ID
@@ -159,6 +172,9 @@ BiliKards 是一个 KARDS B 站助手插件，包含两大核心功能：
   - 找不到卡牌：未指定要设置永久 ID 的卡牌
   - 导入失败：不能在 deck_cards.json 缺失的牌短码处手动添加
   - 视觉模型调用失败：请在 AstrBot 中添加支持图片的模型，或填写 vision_provider_id
+
+  所有 kards 子命令、watch 开关和 oc 指令也已注册为 LLM 工具
+  （kards_* / watch_* / oc_*），开启工具调用的模型可直接调用。
 
 ----------------------------------------------------------------
   七、文件路径速查

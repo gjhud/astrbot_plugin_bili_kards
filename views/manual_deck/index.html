@@ -105,6 +105,10 @@
       gap: 8px; margin-bottom: 10px; flex-wrap: wrap;
     }
     .catalog { display: flex; flex-direction: column; gap: 6px; max-height: 560px; overflow: auto; padding-right: 4px; }
+    .card-preview { margin-top: 12px; padding: 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel-2); text-align: center; }
+    .card-preview.hidden { display: none; }
+    .card-preview-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+    .card-preview img { display: block; max-width: 100%; max-height: 520px; margin: 0 auto; border-radius: 8px; }
     .row-wrap { display: flex; flex-direction: column; gap: 4px; }
     .row {
       display: flex; align-items: center; gap: 10px; padding: 8px 10px;
@@ -292,11 +296,18 @@
           </div>
           <div class="chips" id="faction-chips"></div>
           <div class="filter-actions">
-            <span class="muted">名称搜索忽略空格；名称、别名、关键字可组合筛选；费用/攻击/防御支持范围</span>
+            <span class="muted">名称搜索忽略空格；名称、别名、关键字可组合筛选；费用/攻击/防御支持范围；双击卡牌查看卡图</span>
             <button class="btn small" id="btn-reset-filters">重置筛选</button>
           </div>
           <div class="alias-panel hidden" id="alias-library"></div>
           <div class="catalog" id="catalog"></div>
+          <div class="card-preview hidden" id="card-preview">
+            <div class="card-preview-head">
+              <b id="card-preview-name">卡图</b>
+              <button class="btn small" id="btn-close-card-preview">关闭</button>
+            </div>
+            <img id="card-preview-img" alt="卡图预览" />
+          </div>
         </div>
       </section>
 
@@ -627,6 +638,27 @@
         });
       }
 
+      async function showCardPreview(id) {
+        const card = state.catalog.find((item) => item.id === id);
+        if (!card) return;
+        try {
+          const data = await get("manual/card-image", { card_id: card.card_id || "" });
+          if (!data.image) {
+            toast("该卡暂无本地卡图");
+            return;
+          }
+          $("card-preview-name").textContent = `${card.name || "卡图"} · ${card.card_id || ""}`;
+          $("card-preview-img").src = data.image;
+          $("card-preview").classList.remove("hidden");
+        } catch (err) {
+          toast(err.message || "读取卡图失败");
+        }
+      }
+
+      $("btn-close-card-preview").addEventListener("click", () => {
+        $("card-preview").classList.add("hidden");
+      });
+
       function renderCatalog() {
         const hits = state.catalog.filter(matches);
         // With no active filter, show the whole catalog instead of paginating.
@@ -699,6 +731,9 @@
             else state.fixExpanded.add(id);
             renderCatalog();
           });
+        });
+        box.querySelectorAll(".row[data-id]").forEach((row) => {
+          row.addEventListener("dblclick", () => showCardPreview(row.dataset.id));
         });
         bindAliasButtons(box);
         bindFixButtons(box);

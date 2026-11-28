@@ -22,23 +22,44 @@ from PIL import Image, ImageDraw, ImageFont
 
 from . import data_paths, deck_code
 
-FONT_PATH = "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc"
-MONO_FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
+# 根据系统选择字体路径
+import sys
+
+if sys.platform == "win32":
+    # Windows 系统字体
+    FONT_PATH = "C:/Windows/Fonts/simhei.ttf"  # 黑体
+    MONO_FONT_PATH = "C:/Windows/Fonts/courbd.ttf"  # 等宽字体
+elif sys.platform == "darwin":
+    # macOS 系统字体
+    FONT_PATH = "/System/Library/Fonts/PingFang.ttc"
+    MONO_FONT_PATH = "/System/Library/Fonts/Helvetica.ttc"
+else:
+    # Linux 系统字体
+    FONT_PATH = "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc"
+    MONO_FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
 
 PLUGIN_DIR = data_paths.PLUGIN_DIR
 LOCAL_THUMB_DIR = data_paths.THUMB_DIR
 CARD_CACHE_DIR = data_paths.CARD_CACHE_DIR
 IMAGE_CACHE_DIR = data_paths.IMAGE_CACHE_DIR
 
-CARD_IMAGE_URL = (
+# 卡图下载优先级：1.wsrv.nl中转 2.weserv.nl中转 3.官网直连 4.kardscm API
+CARD_IMAGE_OFFICIAL = (
+    "https://www.kards.com/images/card/v53/zh-Hans/{card_id}.avif"
+)
+CARD_IMAGE_WSsrv = (
     "https://wsrv.nl/?url="
     "www.kards.com%2Fimages%2Fcard%2Fv53%2Fzh-Hans%2F{card_id}.avif"
     "&output=webp&w=400"
 )
-CARD_IMAGE_FALLBACK = (
+CARD_IMAGE_weserv = (
     "https://images.weserv.nl/?url="
     "www.kards.com%2Fimages%2Fcard%2Fv53%2Fzh-Hans%2F{card_id}.avif"
     "&output=webp&w=400"
+)
+# kardscm API (假设格式)
+CARD_IMAGE_kardscm = (
+    "https://api.kards.com/cards/{card_id}/image"
 )
 
 WIDTH = 1200
@@ -172,11 +193,17 @@ def _local_thumb(card_id: str) -> Image.Image | None:
     if names[0].endswith("_vet"):
         names.append(names[0][:-4])
     for name in names:
-        path = LOCAL_THUMB_DIR / f"{name}.jpg"
-        if path.exists():
-            cached = _load_cached_image(path)
-            if cached is not None:
-                return cached
+        # 只用本地已有文件，不触发联网下载
+        for path in (
+            LOCAL_THUMB_DIR / f"{name}.jpg",
+            CARD_CACHE_DIR / f"{name}.webp",
+            CARD_CACHE_DIR / f"{name}.jpg",
+            CARD_CACHE_DIR / f"{name}.png",
+        ):
+            if path.exists():
+                cached = _load_cached_image(path)
+                if cached is not None:
+                    return cached
     return None
 
 
@@ -185,8 +212,10 @@ async def _download_card_image(
     semaphore: asyncio.Semaphore,
     card: deck_code.DeckCard,
 ) -> Image.Image | None:
+    """Download card image with 3-tier fallback strategy."""
     if not card.card_id:
         return None
+    
     CARD_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     cache_path = CARD_CACHE_DIR / f"{card.card_id.lower()}.webp"
     cached = _load_cached_image(cache_path)
@@ -194,13 +223,23 @@ async def _download_card_image(
         return cached
 
     card_id = quote(card.card_id, safe="")
-    urls = [
-        CARD_IMAGE_URL.format(card_id=card_id),
-        CARD_IMAGE_FALLBACK.format(card_id=card_id),
-    ]
     timeout = aiohttp.ClientTimeout(total=15, connect=8, sock_read=12)
+    
+    # 下载策略：当前机器直连 www.kards.com 会超时，先用可用的中转源，
+    # 再退回官网直连和 API，避免每张卡都先等一次连接超时。
+    download_sources = [
+        # 1. wsrv.nl 中转
+        CARD_IMAGE_WSsrv.format(card_id=card_id),
+        # 2. weserv.nl 中转
+        CARD_IMAGE_weserv.format(card_id=card_id),
+        # 3. 官网直连
+        CARD_IMAGE_OFFICIAL.format(card_id=card_id),
+        # 4. kardscm API
+        CARD_IMAGE_kardscm.format(card_id=card_id),
+    ]
+    
     async with semaphore:
-        for url in urls:
+        for url in download_sources:
             try:
                 async with session.get(url, timeout=timeout) as response:
                     if response.status != 200:
@@ -215,8 +254,10 @@ async def _download_card_image(
                     tmp.write_bytes(data)
                     tmp.replace(cache_path)
                     return result
-            except (aiohttp.ClientError, asyncio.TimeoutError, OSError, ValueError):
+            except (aiohttp.ClientError, asyncio.TimeoutError, OSError, ValueError) as e:
+                # 记录错误但继续尝试下一个源
                 continue
+    
     return None
 
 
@@ -825,12 +866,11 @@ def _render_info(
     deck: deck_code.DecodedDeck,
     output_path: Path,
 ) -> Path:
-    """Render all non-card information as a separate poster."""
+    """Render deck statistics and warnings without listing the cards."""
     canvas = _background(3200)
     draw = ImageDraw.Draw(canvas)
 
     y = _draw_header(draw, deck)
-    y = _draw_decklist(draw, deck, y)
 
     draw.line((MARGIN, y, WIDTH - MARGIN, y), fill=(48, 58, 72), width=1)
     y += 24
@@ -880,8 +920,8 @@ async def render_deck_images(
 
     Returns:
         A tuple ``(cards_path, info_path)``.  The first image tiles the 40
-        deck slots edge to edge; the second contains faction, decklist, curve,
-        stats, warnings, and the deck code.
+        deck slots edge to edge; the second contains only faction info, curve,
+        stats, warnings, and the deck code (no decklist).
     """
     digest = hashlib.sha1(deck.raw.encode("utf-8")).hexdigest()[:16]
     cards_path = IMAGE_CACHE_DIR / f"deck_{digest}_cards.jpg"
@@ -898,7 +938,7 @@ async def render_deck_images(
     await asyncio.to_thread(_render_cards, deck, images, cards_path)
     await asyncio.to_thread(_render_info, deck, info_path)
     _cleanup(IMAGE_CACHE_DIR, 60)
-    _cleanup(CARD_CACHE_DIR, 1200)
+    # 卡图缓存持久保留，渲染卡组时不再裁剪
     return cards_path, info_path
 
 
@@ -1061,6 +1101,64 @@ def render_search_grid(
     ).hexdigest()[:16]
     IMAGE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     output_path = IMAGE_CACHE_DIR / f"search_{digest}.jpg"
+    canvas.save(output_path, "JPEG", quality=93, optimize=True)
+    _cleanup(IMAGE_CACHE_DIR, 60)
+    return output_path
+
+
+# Single-card image used by the `#第N个` chat reply.  The card is drawn much
+# larger than in the search grid so the art is readable on its own.
+def render_single_card(
+    item: dict, query: str = "", index: int = 0, total: int = 0
+) -> Path:
+    """Render one search result as the card art only, without any frame.
+
+    Args:
+        item: Card dictionary with ``card_id``, ``name`` and ``faction`` keys.
+        query: Original search text (kept for API compatibility).
+        index: One-based position (kept for API compatibility).
+        total: Total matches (kept for API compatibility).
+
+    Returns:
+        Path to the generated JPEG.
+    """
+    if not isinstance(item, dict) or not item:
+        raise ValueError("没有可渲染的卡牌")
+
+    card_id = str(item.get("card_id") or "")
+    name = str(item.get("name") or card_id or "单卡")
+    faction = str(item.get("faction") or "")
+    color = _faction_color(faction)
+
+    image = _local_thumb(card_id)
+    if image is not None:
+        # 有本地卡图：只输出卡图本身，不加标题栏、信息条或外框背景
+        canvas = image.convert("RGB")
+    else:
+        # 无本地卡图：输出纯卡面占位，同样不带外部背景
+        canvas = Image.new("RGB", (500, 702), PANEL)
+        draw = ImageDraw.Draw(canvas)
+        draw.rectangle((0, 0, 499, 8), fill=color)
+        draw.text((250, 330), "KARDS", font=_font(18), fill=color, anchor="ma")
+        draw.text(
+            (250, 360),
+            _truncate(draw, name, _font(20), 460),
+            font=_font(20),
+            fill=TEXT,
+            anchor="ma",
+        )
+        if card_id:
+            draw.text(
+                (250, 392),
+                _truncate(draw, card_id, _font(13), 460),
+                font=_font(13),
+                fill=MUTED,
+                anchor="ma",
+            )
+
+    digest = hashlib.sha1(f"single|{card_id}".encode("utf-8")).hexdigest()[:16]
+    IMAGE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    output_path = IMAGE_CACHE_DIR / f"single_{digest}.jpg"
     canvas.save(output_path, "JPEG", quality=93, optimize=True)
     _cleanup(IMAGE_CACHE_DIR, 60)
     return output_path

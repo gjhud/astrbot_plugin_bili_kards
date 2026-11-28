@@ -2,11 +2,14 @@ import asyncio
 import hashlib
 import html
 import json
+import logging
 import re
 import time
 import urllib.parse
 
 import aiohttp
+
+logger = logging.getLogger(__name__)
 
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -403,10 +406,12 @@ class DynamicClient:
     再用 wbi 签名请求动态接口；遇到空列表/风控时换会话重试。
     """
 
-    def __init__(self, uid="2127596945", cache_ttl=300, timeout=15):
+    def __init__(self, uid="2127596945", cache_ttl=300, timeout=15, proxy=None, cookie=None):
         self.uid = str(uid)
         self.cache_ttl = max(0, int(cache_ttl))
         self.timeout = aiohttp.ClientTimeout(total=max(5, int(timeout)))
+        self.proxy = str(proxy or "").strip() or None
+        self.cookie = str(cookie or "").strip() or None
         self.session = None
         self._warmed = False
         self._mixin_key = ""
@@ -420,9 +425,20 @@ class DynamicClient:
         self._cache_ts = 0.0
         self._cache_items = []
 
+    def _headers(self, headers):
+        """Attach an optional logged-in cookie (e.g. SESSDATA) when configured."""
+        if not self.cookie:
+            return headers
+        merged = dict(headers)
+        merged["Cookie"] = self.cookie
+        return merged
+
     async def _ensure(self):
         if self.session is None or self.session.closed:
-            self.session = aiohttp.ClientSession(headers={"User-Agent": UA})
+            kwargs = {"headers": {"User-Agent": UA}}
+            if self.proxy:
+                kwargs["proxy"] = self.proxy
+            self.session = aiohttp.ClientSession(**kwargs)
             self._warmed = False
             self._mixin_key = ""
             self._mixin_ts = 0.0
@@ -449,7 +465,7 @@ class DynamicClient:
     async def _json(self, url, params, referer):
         """GET a Bilibili API endpoint and return parsed JSON or ``None``."""
         await self._ensure()
-        headers = {"User-Agent": UA, "Referer": referer}
+        headers = self._headers({"User-Agent": UA, "Referer": referer})
         try:
             async with self.session.get(
                 url, params=params, headers=headers, timeout=self.timeout
@@ -596,10 +612,12 @@ class DynamicClient:
         if self._mixin_key and time.time() - self._mixin_ts < 3600:
             return self._mixin_key
         await self._ensure()
-        headers = {
-            "User-Agent": UA,
-            "Referer": f"https://space.bilibili.com/{self.uid}/",
-        }
+        headers = self._headers(
+            {
+                "User-Agent": UA,
+                "Referer": f"https://space.bilibili.com/{self.uid}/",
+            }
+        )
         async with self.session.get(NAV, headers=headers, timeout=self.timeout) as resp:
             data = await resp.json()
         wbi = ((data or {}).get("data") or {}).get("wbi_img") or {}
@@ -631,17 +649,22 @@ class DynamicClient:
         encoded = urllib.parse.urlencode(sorted(query.items()))
         query["w_rid"] = hashlib.md5((encoded + mixin_key).encode()).hexdigest()
 
-        headers = {
-            "User-Agent": UA,
-            "Referer": f"https://space.bilibili.com/{self.uid}/dynamic",
-            "Origin": "https://space.bilibili.com",
-            "Accept": "application/json, text/plain, */*",
-        }
+        headers = self._headers(
+            {
+                "User-Agent": UA,
+                "Referer": f"https://space.bilibili.com/{self.uid}/dynamic",
+                "Origin": "https://space.bilibili.com",
+                "Accept": "application/json, text/plain, */*",
+            }
+        )
         async with self.session.get(
             SPACE_FEED, params=query, headers=headers, timeout=self.timeout
         ) as resp:
             if resp.status in (412, 352):
-                raise RuntimeError(f"B站风控 HTTP {resp.status}")
+                raise RuntimeError(
+                    f"B站风控 HTTP {resp.status}：服务器 IP 被拦截，"
+                    "可配置 bili_proxy（代理）或 bili_cookie（登录 Cookie）"
+                )
             if resp.status != 200:
                 raise RuntimeError(f"B站接口 HTTP {resp.status}")
             text = await resp.text()
@@ -666,13 +689,20 @@ class DynamicClient:
                 attempt += 1
                 try:
                     data = await self._fetch_page(offset)
-                except Exception:
+                except Exception as exc:
+                    logger.warning("B站动态请求失败（第 %s 次）：%s", attempt, exc)
                     await self._reset()
                     await asyncio.sleep(2)
                     continue
 
                 code = data.get("code")
                 if code != 0:
+                    logger.warning(
+                        "B站动态接口返回错误（第 %s 次）：code=%s message=%s",
+                        attempt,
+                        code,
+                        data.get("message") or "",
+                    )
                     if code in (-412, -352, 412, 352):
                         await self._reset()
                     await asyncio.sleep(2)
@@ -702,7 +732,9 @@ class DynamicClient:
 
             # 本次失败时退回旧缓存，避免命令直接空手而归。
             if self._cache_items:
+                logger.warning("B站动态拉取失败，本次使用旧缓存（%s 条）", len(self._cache_items))
                 return self._cache_items[:limit]
+            logger.warning("B站动态拉取失败：多次重试均未返回动态，可能被风控")
             return []
 
     async def close(self):
